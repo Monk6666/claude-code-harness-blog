@@ -2,6 +2,7 @@ import { compileMDX } from "next-mdx-remote/rsc";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypePrettyCode from "rehype-pretty-code";
+import remarkGfm from "remark-gfm";
 import { remarkMermaid } from "./remark-mermaid";
 import { mdxComponents } from "@/components/Content/mdx-components";
 
@@ -12,7 +13,7 @@ export async function renderMDX(source: string) {
     options: {
       parseFrontmatter: true,
       mdxOptions: {
-        remarkPlugins: [remarkMermaid],
+        remarkPlugins: [remarkGfm, remarkMermaid],
         rehypePlugins: [
           rehypeSlug,
           [
