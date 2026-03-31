@@ -1,13 +1,58 @@
 ---
 title: "Coordinator & Concurrency — 協調與並行"
-description: "Query Loop 主迴圈設計、StreamingToolExecutor、並行批次分區策略、以及多代理 Swarm 編排"
+description: "Master Query FSM（7 Continue / 10 Terminal）、State 型別設計、StreamingToolExecutor、並行批次分區策略、以及多代理 Swarm 編排"
 sidebar:
   order: 7
 ---
 
+## Master Query 狀態機
+
+在深入細節之前，先看整體：`queryLoop()` 本質上是一個帶有明確狀態轉移的有限狀態機（FSM）。每輪迭代從 Pre-Compaction 管線進入，通過 API Streaming，再到 Post-Stream Decision 點——在那裡決定是「繼續下一輪」還是「終止對話」。
+
+```mermaid
+stateDiagram-v2
+    [*] --> PreCompaction
+
+    state "Pre-Compaction Pipeline" as PreCompaction {
+        [*] --> BudgetTrim
+        BudgetTrim --> Snip : feature HISTORY_SNIP
+        Snip --> Microcompact : microcompact()
+        Microcompact --> Autocompact : threshold = contextWindow − 13k
+        Autocompact --> [*]
+    }
+
+    state "API Streaming" as ApiStream {
+        [*] --> Streaming
+        Streaming --> ToolExec : tool_use block 到達
+        ToolExec --> Streaming : 等待更多 events
+        Streaming --> [*] : stop_reason 收到
+    }
+
+    state "Post-Stream Decision" as Decision {
+        [*] --> DrainTools
+        DrainTools --> PostHooks : executePostSamplingHooks()
+        PostHooks --> StopHooks : handleStopHooks()
+        StopHooks --> BudgetCheck : feature TOKEN_BUDGET
+        BudgetCheck --> [*]
+    }
+
+    PreCompaction --> [*] : blocking_limit
+    PreCompaction --> ApiStream
+
+    ApiStream --> [*] : model_error / image_error / aborted_streaming
+    ApiStream --> Decision
+
+    Decision --> PreCompaction : Continue（7 條路徑，見下表）
+    Decision --> [*] : Terminal（10 條件，見下表）
+```
+
+:::tip[Key Insight]
+注意 `Decision --> PreCompaction` 的回頭箭頭——這是整個 agentic loop 的核心。每次工具呼叫完成後，狀態機都回到 PreCompaction 的開頭，讓下一輪的 API call 有機會看到最新的工具結果。這個「工具呼叫 → 結果回饋 → 再次 LLM」的迴圈，就是 AI 代理能夠「思考-行動-觀察」的底層機制。
+:::
+
 ## Query Loop — 系統的心臟
 
-`src/query.ts` 是 Claude Code 的核心 — 一個大約 1,700 行的 async generator function，驅動整個代理的主迴圈：
+`src/query.ts` 是 Claude Code 的核心 — 一個 1,729 行的 async generator function，驅動整個代理的主迴圈：
 
 ```typescript
 // src/query.ts — 簡化版
@@ -53,6 +98,28 @@ async function* query(
 :::tip[Key Insight]
 注意這是一個 **async generator** (`function*`)。它不是一次性返回所有結果，而是通過 `yield` 逐步產出訊息和事件。這讓 UI 可以即時顯示進度，而不需要等待整個回合完成。
 :::
+
+## 狀態機的記憶體 — State 型別
+
+`queryLoop()` 是一個 `while (true)` 迴圈，但它不是用全域變數或閉包捕獲狀態——每次 `continue` 都寫一個全新的 `State` 物件：
+
+```typescript
+// src/query.ts — State 型別（真實定義，line ~201）
+type State = {
+  messages: Message[]                              // 當前完整對話歷史（含工具結果）
+  toolUseContext: ToolUseContext                   // 工具上下文，含 abortController
+  autoCompactTracking: AutoCompactTrackingState | undefined  // 壓縮輪次追蹤
+  maxOutputTokensRecoveryCount: number            // max_output_tokens 恢復次數（上限 3）
+  hasAttemptedReactiveCompact: boolean            // 防止 reactive compact 死循環
+  maxOutputTokensOverride: number | undefined     // 首次 escalate 到 64k（ESCALATED_MAX_TOKENS）
+  pendingToolUseSummary: Promise<...> | undefined // 背景產生的工具摘要（Haiku call）
+  stopHookActive: boolean | undefined             // stop hook 是否已觸發過
+  turnCount: number                               // 當前輪次計數（從 1 開始）
+  transition: Continue | undefined               // 上一輪 continue 的原因（用於 debug）
+}
+```
+
+**為什麼把狀態全放在一個物件？** 實際程式碼有 7 個 `continue` 站點，每個都需要更新多個欄位。如果用 `let x = ...` 散佈在迴圈裡，漏更新某個欄位就是 bug。`state = { ...newState }` 的模式讓每個 `continue` 形成一個完整的「狀態快照」，也讓測試能直接斷言 `state.transition` 而不需要解析訊息內容。
 
 ## 為什麼用 Generator 而不是 Callback？
 
@@ -281,17 +348,38 @@ Worker 的工具集是 Leader 的子集。Worker 不能安裝 plugin、修改設
 
 ## Terminal Conditions
 
-Query Loop 什麼時候停止？
+`queryLoop()` 通過 `return` 終止，每個終止點都帶有明確的 `reason` 字串（可用於 telemetry 與測試斷言）：
 
-| 條件 | 行為 |
-|------|------|
-| `stop_reason === 'end_turn'` | LLM 認為任務完成 |
-| Max turns reached | 達到最大輪次限制 |
-| Budget exhausted | Token 預算耗盡 |
-| Thinking-only response | LLM 只思考不行動（加預算） |
-| Prompt too long | 上下文溢出（觸發壓縮） |
-| API error | API 錯誤 |
-| User abort | 使用者按 Ctrl+C |
+| `reason` | 觸發條件 | 程式碼位置 |
+|---|---|---|
+| `completed` | 無待執行工具，LLM 不再 tool_use | 正常 end_turn 路徑 |
+| `max_turns` | `nextTurnCount > maxTurns` | 工具結果加入後檢查 |
+| `blocking_limit` | Context 超硬性上限，且無自動壓縮或 reactive compact | Pre-Compaction 入口 |
+| `prompt_too_long` | 收到 413，collapse 佇列空、reactive compact 也失敗 | Post-Stream，withheld 413 處理後 |
+| `model_error` | API 或 runtime 拋出異常 | try/catch 包裹串流迴圈 |
+| `image_error` | `ImageSizeError` 或 `ImageResizeError` | 同上 |
+| `aborted_streaming` | `abortController.signal.aborted`（串流中） | 串流後、工具前 |
+| `aborted_tools` | `abortController.signal.aborted`（工具執行中） | 工具執行後 |
+| `stop_hook_prevented` | Stop hook 返回 `preventContinuation: true` | `handleStopHooks()` 返回後 |
+| `hook_stopped` | 工具執行中 hook 發出 `hook_stopped_continuation` attachment | tool updates 迴圈中 |
+
+## Continue 轉換路徑
+
+每個 `continue` 都寫入 `state.transition.reason`，讓下一輪迭代（或測試）能知道「上輪為什麼繼續」：
+
+| `transition.reason` | 觸發條件 | 對 State 的主要修改 |
+|---|---|---|
+| `next_turn` | 收到 tool_use blocks，工具執行完畢 | `messages` 加入工具結果，`turnCount++` |
+| `collapse_drain_retry` | 收到 withheld 413，contextCollapse 佇列有待 drain 的項目 | `messages` 替換為 drained 版本 |
+| `reactive_compact_retry` | 413 或 media error，reactive compact 成功壓縮 | `messages` 替換，`hasAttemptedReactiveCompact = true` |
+| `max_output_tokens_escalate` | 觸達 token 上限，`maxOutputTokensOverride` 尚未設定 | `maxOutputTokensOverride = ESCALATED_MAX_TOKENS`（64k），僅首次 |
+| `max_output_tokens_recovery` | Escalate 後仍觸達上限，`recoveryCount < 3` | 注入 recovery meta message，`recoveryCount++` |
+| `stop_hook_blocking` | Stop hook 返回 blocking errors | 將 errors 加入 messages，`stopHookActive = true` |
+| `token_budget_continuation` | `turnTokens < budget × 0.9` 且非 diminishing returns | 注入 nudge message，`continuationCount++` |
+
+:::note[Note]
+`max_output_tokens_recovery` 最多執行 3 次（`MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3`）。第 3 次恢復失敗後，withheld error message 被 yield 出去，loop 以 `completed` 終止。`ESCALATED_MAX_TOKENS`（64k）在 `src/utils/context.ts` 定義，只在特定 feature gate 啟用時生效。
+:::
 
 ## 關鍵要點
 
