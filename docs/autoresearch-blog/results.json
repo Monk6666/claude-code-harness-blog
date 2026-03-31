@@ -1,0 +1,69 @@
+{
+  "skill_name": "harness-blog",
+  "status": "complete",
+  "current_experiment": 4,
+  "baseline_score": 64.0,
+  "best_score": 96.0,
+  "experiments": [
+    {
+      "id": 0,
+      "score": 16,
+      "max_score": 25,
+      "pass_rate": 64.0,
+      "status": "baseline",
+      "description": "original chapters — no changes",
+      "chapter": "all-5-priority"
+    },
+    {
+      "id": 1,
+      "score": 17,
+      "max_score": 25,
+      "pass_rate": 68.0,
+      "status": "keep",
+      "description": "Ch07: stateDiagram-v2 FSM + State type docs + terminal/continue tables",
+      "chapter": "Ch.07"
+    },
+    {
+      "id": 2,
+      "score": 21,
+      "max_score": 25,
+      "pass_rate": 84.0,
+      "status": "keep",
+      "description": "Ch02: TrackedTool FSM (queued→executing→completed→yielded) + runToolUse sequence",
+      "chapter": "Ch.02"
+    },
+    {
+      "id": 3,
+      "score": 22,
+      "max_score": 25,
+      "pass_rate": 88.0,
+      "status": "keep",
+      "description": "Ch03: TaskStatus lifecycle FSM + mode comparison table + fix AI smell",
+      "chapter": "Ch.03"
+    },
+    {
+      "id": 4,
+      "score": 24,
+      "max_score": 25,
+      "pass_rate": 96.0,
+      "status": "keep",
+      "description": "Ch06: 4-layer compression stateDiagram-v2 + motivation table + fix source refs + fix AI smell",
+      "chapter": "Ch.06"
+    }
+  ],
+  "eval_breakdown": [
+    {"name": "E1 Source accuracy", "pass_count": 5, "total": 5},
+    {"name": "E2 State machine present", "pass_count": 4, "total": 5},
+    {"name": "E3 Design motivation", "pass_count": 5, "total": 5},
+    {"name": "E4 Accessible entry", "pass_count": 5, "total": 5},
+    {"name": "E5 No AI smell", "pass_count": 5, "total": 5}
+  ],
+  "priority_order": [
+    "Ch.07 — Master Query State Machine ✅",
+    "Ch.02 — Tool Execution State Machine ✅",
+    "Ch.03 — Agent Lifecycle + SDK FSM ✅",
+    "Ch.06 — Compression & Recovery Strategy ✅",
+    "Ch.04 — Permission Strategy FSM (not needed — threshold reached)"
+  ],
+  "stop_reason": "Quality threshold exceeded: 96% > 95% target after Experiment 4"
+}

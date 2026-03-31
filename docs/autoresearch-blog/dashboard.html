@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Harness Blog Autoresearch Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8f9fa; color: #333; padding: 24px; }
+  h1 { font-size: 1.5rem; font-weight: 600; color: #1a1a2e; margin-bottom: 4px; }
+  .subtitle { color: #666; font-size: 0.875rem; margin-bottom: 24px; }
+  .status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-left: 8px; }
+  .status-running { background: #e3f2fd; color: #1565c0; }
+  .status-complete { background: #e8f5e9; color: #2e7d32; }
+  .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 20px; }
+  .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+  .card h2 { font-size: 0.875rem; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px; }
+  .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+  .metric { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); text-align: center; }
+  .metric-value { font-size: 2rem; font-weight: 700; color: #1a1a2e; }
+  .metric-label { font-size: 0.75rem; color: #888; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  th { text-align: left; padding: 8px 12px; background: #f0f2f5; color: #555; font-weight: 600; border-bottom: 2px solid #e0e0e0; }
+  td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
+  tr:hover td { background: #fafafa; }
+  .exp-baseline { border-left: 3px solid #90caf9; }
+  .exp-keep { border-left: 3px solid #a5d6a7; }
+  .exp-discard { border-left: 3px solid #ef9a9a; }
+  .exp-running { border-left: 3px solid #ffe082; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.7rem; font-weight: 600; }
+  .badge-baseline { background: #e3f2fd; color: #1565c0; }
+  .badge-keep { background: #e8f5e9; color: #2e7d32; }
+  .badge-discard { background: #ffebee; color: #c62828; }
+  .badge-running { background: #fff8e1; color: #f57f17; }
+  .eval-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .eval-name { font-size: 0.8rem; width: 160px; flex-shrink: 0; }
+  .bar-track { flex: 1; height: 8px; background: #eee; border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; background: #a5d6a7; border-radius: 4px; transition: width 0.5s ease; }
+  .eval-pct { font-size: 0.75rem; color: #888; width: 36px; text-align: right; }
+  .priority-list { list-style: none; }
+  .priority-list li { padding: 6px 0; font-size: 0.8rem; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 8px; }
+  .priority-num { background: #e3f2fd; color: #1565c0; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-weight: 700; flex-shrink: 0; }
+  .refresh-note { font-size: 0.7rem; color: #aaa; text-align: right; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Harness Blog — Autoresearch Dashboard <span class="status-badge status-running" id="status-badge">Running</span></h1>
+<p class="subtitle" id="current-exp">Baseline established — starting Experiment 1</p>
+
+<div class="metric-row">
+  <div class="metric">
+    <div class="metric-value" id="baseline-score">64%</div>
+    <div class="metric-label">Baseline Score</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value" id="best-score">64%</div>
+    <div class="metric-label">Best Score</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value" id="exp-count">0</div>
+    <div class="metric-label">Experiments Run</div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Score Progression</h2>
+    <canvas id="progressChart" height="220"></canvas>
+  </div>
+  <div class="card">
+    <h2>Eval Breakdown</h2>
+    <div id="eval-bars"></div>
+    <hr style="margin:12px 0; border-color:#f0f0f0;">
+    <h2>Priority Queue</h2>
+    <ul class="priority-list" id="priority-list"></ul>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Experiment Log</h2>
+  <table>
+    <thead><tr><th>#</th><th>Chapter</th><th>Score</th><th>Pass Rate</th><th>Status</th><th>Change</th></tr></thead>
+    <tbody id="exp-table"></tbody>
+  </table>
+</div>
+
+<p class="refresh-note">Auto-refreshes every 10s from results.json</p>
+
+<script>
+let chart = null;
+
+async function loadData() {
+  try {
+    const r = await fetch('results.json?t=' + Date.now());
+    const data = await r.json();
+    render(data);
+  } catch(e) {
+    console.warn('Could not load results.json', e);
+  }
+}
+
+function render(data) {
+  // Status badge
+  const badge = document.getElementById('status-badge');
+  badge.textContent = data.status === 'complete' ? 'Complete' : 'Running';
+  badge.className = 'status-badge ' + (data.status === 'complete' ? 'status-complete' : 'status-running');
+
+  // Current experiment
+  document.getElementById('current-exp').textContent =
+    data.status === 'complete'
+      ? `Finished — ${data.experiments.length - 1} experiments`
+      : `Running Experiment ${data.current_experiment}...`;
+
+  // Metrics
+  document.getElementById('baseline-score').textContent = data.baseline_score.toFixed(1) + '%';
+  document.getElementById('best-score').textContent = data.best_score.toFixed(1) + '%';
+  document.getElementById('exp-count').textContent = data.experiments.length - 1;
+
+  // Chart
+  const labels = data.experiments.map(e => 'E' + e.id);
+  const scores = data.experiments.map(e => e.pass_rate);
+  const colors = data.experiments.map(e =>
+    e.status === 'baseline' ? '#90caf9' :
+    e.status === 'keep' ? '#a5d6a7' :
+    e.status === 'discard' ? '#ef9a9a' : '#ffe082'
+  );
+
+  if (!chart) {
+    const ctx = document.getElementById('progressChart').getContext('2d');
+    chart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Pass Rate %',
+          data: scores,
+          backgroundColor: colors,
+          borderWidth: 0,
+          borderRadius: 4,
+        }, {
+          label: 'Trend',
+          data: scores,
+          type: 'line',
+          borderColor: '#6366f1',
+          pointBackgroundColor: '#6366f1',
+          pointRadius: 4,
+          fill: false,
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { min: 0, max: 100, ticks: { callback: v => v + '%' } }
+        }
+      }
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = scores;
+    chart.data.datasets[0].backgroundColor = colors;
+    chart.data.datasets[1].data = scores;
+    chart.update();
+  }
+
+  // Eval bars
+  const evalBars = document.getElementById('eval-bars');
+  evalBars.innerHTML = (data.eval_breakdown || []).map(e => {
+    const pct = Math.round((e.pass_count / e.total) * 100);
+    return `<div class="eval-bar">
+      <span class="eval-name">${e.name}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <span class="eval-pct">${pct}%</span>
+    </div>`;
+  }).join('');
+
+  // Priority list
+  const prioList = document.getElementById('priority-list');
+  prioList.innerHTML = (data.priority_order || []).map((p, i) =>
+    `<li><span class="priority-num">${i+1}</span>${p}</li>`
+  ).join('');
+
+  // Table
+  const tbody = document.getElementById('exp-table');
+  tbody.innerHTML = [...data.experiments].reverse().map(e => {
+    const cls = 'exp-' + e.status;
+    const badge = `<span class="badge badge-${e.status}">${e.status}</span>`;
+    return `<tr class="${cls}">
+      <td>${e.id}</td>
+      <td>${e.chapter || '—'}</td>
+      <td>${e.score}/${e.max_score}</td>
+      <td>${e.pass_rate.toFixed(1)}%</td>
+      <td>${badge}</td>
+      <td style="max-width:320px">${e.description}</td>
+    </tr>`;
+  }).join('');
+}
+
+loadData();
+setInterval(loadData, 10000);
+</script>
+</body>
+</html>
