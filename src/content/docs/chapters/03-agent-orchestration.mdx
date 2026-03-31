@@ -15,6 +15,38 @@ sidebar:
 
 Claude Code 解決這個問題的方式是：**主代理可以派遣子代理**。每個子代理是一個獨立的 AI 對話，擁有自己的工具集和上下文，但共享父代理的 prompt cache。
 
+## 代理生命週期狀態機
+
+任何子代理都會被註冊為一個 `Task`，在 `AppState.tasks` 中有完整的生命週期追蹤。`Task.ts` 定義了統一的狀態機：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : createTaskStateBase()\n初始狀態
+
+    Pending --> Running : 開始執行\n(query loop 啟動)
+
+    Running --> Completed : queryLoop() 返回\nTerminal reason
+    Running --> Failed : 未處理的異常
+    Running --> Killed : task.kill() 呼叫\n(使用者停止或父代理取消)
+
+    Completed --> [*]
+    Failed --> [*]
+    Killed --> [*]
+
+    note right of Running
+        isTerminalTaskStatus():
+        completed | failed | killed
+    end note
+```
+
+三種執行模式對生命週期的影響不同：
+
+| 模式 | Task 類型 | `Pending` 狀態 | 父代理的行為 |
+|---|---|---|---|
+| 同步（`run_in_background: false`） | 無 Task（inline 執行） | 無 | 阻塞等待結果 |
+| 非同步（`run_in_background: true`） | `LocalAgentTask` | pending → running | 立即返回 task ID |
+| 遠端（`isolation: 'worktree'` + remote） | `RemoteAgentTask` | pending（輪詢中） | 立即返回，定期輪詢 |
+
 ## AgentTool 的三種執行模式
 
 ```mermaid
@@ -49,7 +81,7 @@ graph LR
 
 ## CacheSafeParams — 成本優化的關鍵
 
-Claude Code 最精妙的設計之一是 **Prompt Cache 共享**。
+**Prompt Cache 共享**是讓多代理系統成本可控的關鍵機制。
 
 ### 問題
 
