@@ -1,0 +1,496 @@
+---
+title: "Ch.12 — Feature Inventory"
+sidebar:
+  order: 12
+---
+
+## 前置知識橋
+
+讀完前 11 章，你對 Claude Code 的架構有了完整認識。本章揭示架構之外的能力邊界——什麼是已經存在但還沒公開的功能。
+
+Claude Code 的原始碼中，有一批功能完整實作、通過測試，卻透過三種機制對外隱藏：`bun:bundle` 的 `feature()` 編譯期旗標（死碼消除）、GrowthBook 的執行期閘門、以及 Commander.js 的 `.hideHelp()` 呼叫。理解這三層機制，是理解 Claude Code 能力邊界的關鍵。
+
+---
+
+## 為什麼有隱藏功能？
+
+**大多數人把「隱藏功能」想成彩蛋。在 Claude Code 裡，它是安全網。**
+
+一個功能能否在生產環境安全啟用，取決於三個條件：程式碼正確性、容量規劃、以及使用者預期管理。任何一個條件未到位，都應該讓功能保持關閉。Feature flag 的存在不是為了神秘感，而是讓 Anthropic 能在生產環境中安全地分離「可部署」與「可使用」這兩個概念。
+
+Martin Fowler 在 2017 年的 Feature Toggles (aka Feature Flags) 文章中描述了這個工程實踐的核心邏輯：
+
+> "Feature Toggles are a powerful technique, allowing teams to modify system behavior without changing code. They fall into various usage categories, and it's important to be mindful of the category you're dealing with. Toggles introduce complexity. We can keep that complexity in check by using smart toggle implementation practices and by being diligent about retiring toggles that are no longer needed."
+>
+> — Martin Fowler, "Feature Toggles (aka Feature Flags)," martinfowler.com, 2017
+> https://martinfowler.com/articles/feature-toggles.html
+
+Fowler 區分了四種 toggle 類別：Release Toggles（漸進式推出）、Experiment Toggles（A/B 測試）、Ops Toggles（緊急關閉）、Permission Toggles（使用者分層）。Claude Code 的 GrowthBook 實作四者兼用。
+
+### GrowthBook 作為旗標管理系統
+
+**問題**：如何在不重新部署的情況下，對特定的用戶子集啟用一個功能？
+
+**背景**：Claude Code 部署在全球數十萬個使用者端，版本更新透過 npm 推送，但不能假設所有人即時更新。需要一個與部署週期解耦的控制平面。
+
+**解決方案**：GrowthBook 在 `src/services/analytics/growthbook.ts` 中被初始化為一個 singleton `client`。每次啟動時，客戶端以 `GrowthBookUserAttributes` 向 GrowthBook 服務器拉取個人化旗標值——屬性包含 `organizationUUID`、`subscriptionType`、`rateLimitTier`、`platform`、`appVersion` 等 15+ 個維度。程式碼中以 `checkStatsigFeatureGate_CACHED_MAY_BE_STALE()` 函數讀取旗標，"CACHED_MAY_BE_STALE" 後綴明確表示：旗標值從磁碟快取讀取，不阻塞 UI 啟動。
+
+```typescript
+// src/services/analytics/growthbook.ts
+export type GrowthBookUserAttributes = {
+  id: string
+  sessionId: string
+  deviceID: string
+  platform: 'win32' | 'darwin' | 'linux'
+  organizationUUID?: string
+  subscriptionType?: string
+  rateLimitTier?: string
+  appVersion?: string
+  // ... 共 15+ 個維度
+}
+```
+
+**代價**：快取機制讓 feature flag 的狀態在冷啟動時最多落後一個快取週期。對緊急 kill switch（如 `tengu_amber_quartz_disabled`）來說，這個延遲是可接受的代價，換取的是零啟動延遲。
+
+### 編譯期死碼消除
+
+除了執行期的 GrowthBook 閘門，Claude Code 還有第二層機制：`bun:bundle` 的 `feature()` macro。
+
+```typescript
+// src/bridge/bridgeEnabled.ts
+export function isBridgeEnabled(): boolean {
+  return feature('BRIDGE_MODE')  // 在外部 build 中，整個 function 回傳 false
+    ? isClaudeAISubscriber() &&
+        getFeatureValue_CACHED_MAY_BE_STALE('tengu_ccr_bridge', false)
+    : false
+}
+```
+
+`feature('BRIDGE_MODE')` 在編譯時求值。外部發行版中此值為 `false`，Bun 的 bundler 直接消除整個 true branch——不只是不執行，而是連字符串字面量 `'tengu_ccr_bridge'` 都不出現在 bundle 中。這讓外部用戶完全看不到內部 GrowthBook flag 的名稱。
+
+---
+
+## 一、重大未發佈功能
+
+### 1. Coordinator Mode（多 Agent 協調）
+
+**你以為 `/agents` 是全部的多 Agent 能力。但 Coordinator Mode 是另一個層次的架構——讓 Claude Code 本身成為指揮官而非工人。**
+
+**背景**：Ch.07 描述的 Swarm 架構中，使用者啟動一個 Claude Code session，它可以透過 `AgentTool` 生成子 Agent。Coordinator Mode 將這個關係制度化：主 session 不再處理任何工具呼叫，它的唯一職責是協調多個 Worker 完成高層目標。
+
+**解決方案**：以環境變數 `CLAUDE_CODE_COORDINATOR_MODE=1` 啟用，同時需要 `feature('COORDINATOR_MODE')` 編譯旗標。核心函數 `isCoordinatorMode()` 和 `getCoordinatorSystemPrompt()` 在 `src/coordinator/coordinatorMode.ts` 實現。Coordinator 獲得一個完全不同的 system prompt——它知道自己是 orchestrator，使用 `AgentTool`（生成新 Worker）、`SendMessageTool`（繼續現有 Worker）、`TaskStopTool`（終止 Worker）三個專屬工具。Workers 透過 `<task-notification>` XML 格式回報結果，Coordinator 視為 user-role 訊息接收。
+
+```typescript
+// src/coordinator/coordinatorMode.ts
+export function isCoordinatorMode(): boolean {
+  if (feature('COORDINATOR_MODE')) {
+    return isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE)
+  }
+  return false
+}
+
+export function matchSessionMode(
+  sessionMode: 'coordinator' | 'normal' | undefined,
+): string | undefined {
+  // 恢復 session 時，確保模式與原始 session 一致
+  // 若不一致，翻轉環境變數而非拒絕恢復
+}
+```
+
+一旦啟用，`getCoordinatorUserContext()` 還會把 scratchpad 目錄注入上下文——scratchpad 是 Worker 間共享知識的檔案目錄，受 `tengu_scratch` GrowthBook 閘門控制，Worker 在此目錄讀寫不需要權限提示。
+
+**代價**：Coordinator Mode 讓 Coordinator 不再直接使用 `BashTool` 或 `FileEditTool`——它只能透過 Worker 間接操作。這是設計選擇：犧牲 Coordinator 的直接操作能力，換取清晰的責任分離和更高的並行度。
+
+---
+
+### 2. KAIROS（守護程式模式）
+
+**你以為 Claude Code 是一個互動式 CLI。KAIROS 讓它成為一個持續運行的事件驅動後台服務。**
+
+**背景**：互動式 REPL 的設計假設是「使用者在線」——有人在輸入，Claude 在回應。但許多工程場景需要的是持續監聽：等待 GitHub PR 被更新、等待 CI 失敗、等待排程任務觸發。這些場景需要一個 daemon 架構。
+
+**解決方案**：KAIROS 以五個 feature flags 組成一個功能族群：`KAIROS`（核心 daemon 模式）、`KAIROS_BRIEF`（自動彙整待辦摘要）、`KAIROS_CHANNELS`（MCP channel 監聽）、`KAIROS_GITHUB_WEBHOOKS`（GitHub webhook 訂閱）、`KAIROS_PUSH_NOTIFICATION`（推送通知）。在 `src/main.tsx` 中，`assistantModule` 和 `kairosGate` 只在 `feature('KAIROS')` 為真時才載入——確保外部 build 完全不包含 daemon 基礎設施的任何程式碼。
+
+```typescript
+// src/main.tsx
+const assistantModule = feature('KAIROS')
+  ? require('./assistant/index.js') as typeof import('./assistant/index.js')
+  : null
+const kairosGate = feature('KAIROS')
+  ? require('./assistant/gate.js') as typeof import('./assistant/gate.js')
+  : null
+```
+
+KAIROS 的 cron 子系統（Agent Triggers）是其中獨立可出貨的部分，已在公開 build 中部分可用（見功能 7）。
+
+**代價**：Daemon 模式讓 Claude Code 的資源消耗從「按需」變為「持續」。後台常駐服務持續消耗記憶體和 CPU，不適合沒有充足計算資源的環境。
+
+---
+
+### 3. Bridge Mode（遠端控制）
+
+**你以為 Claude Code 只能在同一台機器上使用。Bridge Mode 讓手機或瀏覽器成為遠端控制器。**
+
+**背景**：Claude Code 執行在開發者的本地機器，擁有完整的檔案系統存取權和開發工具。但使用者有時需要從另一個裝置（如手機或 claude.ai 網頁）繼續工作。
+
+**解決方案**：Bridge Mode 透過 CloudControl Relay（CCR）建立一個代理通道。`isBridgeEnabled()` 函數在 `src/bridge/bridgeEnabled.ts` 中實現三層門控：`feature('BRIDGE_MODE')` 編譯旗標、`isClaudeAISubscriber()` 確保用戶有 claude.ai OAuth token（API key、Bedrock、Vertex 用戶無法使用，因為 CCR 需要 OAuth token 進行認證）、以及 `tengu_ccr_bridge` GrowthBook 閘門控制分批推出。
+
+```typescript
+// src/bridge/bridgeEnabled.ts
+export function isBridgeEnabled(): boolean {
+  return feature('BRIDGE_MODE')
+    ? isClaudeAISubscriber() &&
+        getFeatureValue_CACHED_MAY_BE_STALE('tengu_ccr_bridge', false)
+    : false
+}
+
+export async function getBridgeDisabledReason(): Promise<string | null> {
+  if (feature('BRIDGE_MODE')) {
+    if (!isClaudeAISubscriber()) {
+      return 'Remote Control requires a claude.ai subscription.'
+    }
+    if (!hasProfileScope()) {
+      return 'Remote Control requires a full-scope login token.'
+    }
+    // ... 更多診斷邏輯
+  }
+  return 'Remote Control is not available in this build.'
+}
+```
+
+`getBridgeDisabledReason()` 值得特別注意：它不僅回傳「是否可用」，還回傳具體的診斷訊息和修復步驟——這是工程師深思熟慮用戶體驗的例子。
+
+**代價**：Bridge Mode 要求完整的 OAuth 登入流程（`user:profile` scope），這與 API key 或 setup-token 工作流不相容。從安全角度看，這是正確的設計——遠端控制一個有檔案系統存取權的 agent 需要最高強度的認證。
+
+---
+
+### 4. BUDDY（AI 精靈）
+
+**你以為 Claude Code 是純文字的 CLI。BUDDY 在終端中繪製一個有稀有度系統的互動式精靈角色。**
+
+**背景**：長時間的 agentic session 讓開發者盯著滾動的日誌。BUDDY 是一個實驗性的「存在感」設計——在終端角落放置一個視覺角色，讓工作過程更有伴侶感。
+
+**解決方案**：`src/buddy/companion.ts` 實現了一個完整的 RPG 風格角色系統。`roll()` 函數以 `mulberry32()` seeded PRNG 從 `userId + SALT` 生成確定性的 companion——同一個 userId 永遠得到同一個 companion，確保跨 session 一致性。SALT 值 `'friend-2026-401'` 版本化，讓 Anthropic 可以在重大版本重置所有人的 companion。Companion 有五個稀有度：`common`、`uncommon`、`rare`、`epic`、`legendary`（各有不同的 stat floor），以及 16 種物種——duck、goose、blob、cat、dragon、octopus、owl、penguin、turtle、snail、ghost、axolotl、capybara、cactus、robot、rabbit。
+
+```typescript
+// src/buddy/companion.ts
+const SALT = 'friend-2026-401'
+
+export function roll(userId: string): Roll {
+  const key = userId + SALT
+  if (rollCache?.key === key) return rollCache.value
+  const value = rollFrom(mulberry32(hashString(key)))
+  rollCache = { key, value }
+  return value
+}
+
+// 注意：物種名稱在 types.ts 中以十六進位編碼避免觸發 canary 檢測
+// const duck = String.fromCharCode(0x64, 0x75, 0x63, 0x6b) as 'duck'
+```
+
+`companionUserId()` 優先使用 OAuth 帳號 UUID，fallback 到 config 的 `userID`，最後 fallback 到字串 `'anon'`——確保任何認證狀態下都能生成 companion。
+
+**代價**：BUDDY 需要 `useBuddyNotification` React hook 在每次 keystroke 和每個 Agent 回合重新計算 companion 狀態（雖然有 `rollCache` 快取）。這個設計優先選擇「角色絕對一致」而非「極致效能」。
+
+---
+
+### 5. ULTRAPLAN / ULTRATHINK（進階規劃與思考）
+
+**你以為 Plan Mode 是 Claude Code 最深度的規劃能力。ULTRAPLAN 把規劃工作外包給遠端叢集上的 opus 模型，讓本地計算資源不再是上限。**
+
+**背景**：Plan Mode 在本地 session 中執行，受到相同的模型和上下文限制。對於需要深度多角度分析的複雜任務（如重構整個資料庫 schema 或設計新 API），本地計算力不足。
+
+**解決方案**：`src/commands/ultraplan.tsx` 實現了 ULTRAPLAN 命令。核心函數 `getUltraplanModel()` 透過 `tengu_ultraplan_model` GrowthBook flag 選擇模型，預設為 `ALL_MODEL_CONFIGS.opus46.firstParty`——注意這是第一方 canonical ID，不是 Bedrock ARN 或 Vertex ID，因為規劃在 CCR（CloudControl Relay）的 Anthropic 基礎設施上執行。ULTRAPLAN 有 30 分鐘的超時（`ULTRAPLAN_TIMEOUT_MS = 30 * 60 * 1000`），遠超本地 session 的預設值。`buildUltraplanPrompt()` 組裝初始提示，支援傳入 `seedPlan` 讓用戶提供草稿計畫作為起點。
+
+```typescript
+// src/commands/ultraplan.tsx
+const ULTRAPLAN_TIMEOUT_MS = 30 * 60 * 1000  // 30 分鐘
+
+function getUltraplanModel(): string {
+  return getFeatureValue_CACHED_MAY_BE_STALE(
+    'tengu_ultraplan_model',
+    ALL_MODEL_CONFIGS.opus46.firstParty,
+  )
+}
+
+export function buildUltraplanPrompt(blurb: string, seedPlan?: string): string {
+  // seedPlan 支援從現有草稿繼續深化
+  // 系統提示包在 <system-reminder> 標籤中隱藏於 CCR 瀏覽器 UI
+}
+```
+
+ULTRATHINK 是類似機制：透過 `ULTRATHINK` feature flag 啟用更長的推理鏈條，而 `BUILTIN_EXPLORE_PLAN_AGENTS` 則在 Plan Mode 中啟用多個內建 explore agent 並行分析。
+
+**代價**：ULTRAPLAN 要求遠端執行，因此不支援 Bedrock/Vertex 配置，也不能在離線環境使用。30 分鐘的超時意味著可能消耗大量 API 配額，且 prompt.txt 被設計成不包含 "ultraplan" 字串，避免遠端 CCR CLI 的關鍵字偵測自我觸發。
+
+---
+
+### 6. Agent Triggers（自動排程觸發）
+
+**你以為 Claude Code 只在你輸入時工作。Agent Triggers 讓它按 cron 排程自動執行任務——即使你不在。**
+
+**背景**：許多重複性工程任務（每日代碼審查、定期健康檢查、週報生成）都有固定的觸發模式，不應該依賴人工手動啟動。
+
+**解決方案**：`CronTask` 型別定義在 `src/utils/cronTasks.ts`，儲存於 `.claude/scheduled_tasks.json`。任務有兩種模式：one-shot（執行一次後自動刪除）和 recurring（按排程重複執行）。`isKairosCronEnabled()` 函數在 `src/tools/ScheduleCronTool/prompt.ts` 中組合了兩層閘門：`feature('AGENT_TRIGGERS')` 編譯旗標和 `tengu_kairos_cron` GrowthBook 閘門（預設值為 `true`，確保 Bedrock/Vertex 用戶不因遙測停用而無法使用基礎 cron 功能）。
+
+```typescript
+// src/utils/cronTasks.ts
+export type CronTask = {
+  id: string
+  cron: string         // 5 欄位 cron 表達式，本地時區
+  prompt: string       // 到期時發送給 REPL 的提示
+  createdAt: number
+  lastFiredAt?: number
+  recurring?: boolean
+  permanent?: boolean  // 豁免自動過期，用於 assistant mode 內建任務
+  durable?: boolean    // false = session-only，不寫磁碟
+  agentId?: string     // 路由至特定 teammate 的 queue
+}
+```
+
+值得注意的細節：排程器建議避免在整點或半點觸發（`:00`、`:30`），因為全球用戶同時要求「每天 9 點」都使用 `0 9`，造成 API 請求在同一秒湧入。源碼的設計文件明確說明：選擇 `57 8 * * *` 而非 `0 9 * * *`，使流量自然分散。`isDurableCronEnabled()` 進一步控制任務是否持久化到磁碟（預設 `true`，但 `CLAUDE_CODE_DISABLE_CRON` 環境變數可完全停用整個排程系統）。
+
+**代價**：Recurring 任務有最大存活時間（`DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs`），到期後自動刪除，上限一個 session 生命週期的長度。這防止了遺忘的排程任務永久消耗資源，但也意味著「真正永久的排程」只能透過 `permanent: true` 旗標（僅供內部程式寫入）實現。
+
+---
+
+### 7. Workflow Scripts（工作流腳本）
+
+**你以為 Claude Code 的 Skills 系統是最接近「可程式化工作流」的能力。Workflow Scripts 讓整個 multi-step 流程可以宣告式定義。**
+
+**背景**：Skills 是 prompt-level 的指令集，仍然依賴 LLM 決定每一步。對於有確定性步驟的工作流（「先跑測試，通過後提交，失敗後回滾」），需要更確定性的控制流。
+
+**解決方案**：`WORKFLOW_SCRIPTS` feature flag 啟用工作流腳本引擎，允許用戶定義可重複執行的自動化流程腳本——類似 GitHub Actions workflow，但在 Claude Code session 內執行，每個步驟可以呼叫 Claude Code 工具。`src/skills/bundled/index.ts` 和 `src/commands.ts` 中已有 `AGENT_TRIGGERS` 相關的工作流基礎設施。
+
+**代價**：Workflow Scripts 與現有的 Skills 系統有能力重疊，這是刻意的設計分層——Skills 處理「如何」（LLM 決策），Workflow Scripts 處理「何時」和「是否」（確定性控制流）。
+
+---
+
+### 8. Team Memory（團隊記憶）
+
+**你以為 Claude Code 的記憶在 session 結束時消失。Team Memory 讓整個開發團隊的知識跨 session、跨成員、跨機器共享。**
+
+**背景**：個人 CLAUDE.md 解決了單一開發者的知識持久化問題，但無法解決團隊知識共享的問題——A 在 session 中發現的 API 怪癖，B 在下一個 session 中會再次踩坑。
+
+**解決方案**：`src/services/teamMemorySync/index.ts` 實現了一個完整的雙向同步服務。團隊記憶以 repo 為 scope（用 git remote URL 的 hash 識別），透過 `/api/claude_code/team_memory` REST API 儲存在 Anthropic 服務器。同步語義嚴格：server wins per-key（pull 用服務器內容覆蓋本地）、delta upload（push 只上傳 hash 不同的 key）、file deletion 不傳播（刪除本地檔案不會刪除服務器版本，下次 pull 會恢復它）。
+
+```typescript
+// src/services/teamMemorySync/index.ts
+// API contract:
+// GET  /api/claude_code/team_memory?repo={owner/repo}            → TeamMemoryData
+// GET  /api/claude_code/team_memory?repo={owner/repo}&view=hashes → 僅 metadata + checksums
+// PUT  /api/claude_code/team_memory?repo={owner/repo}            → upsert entries
+// 404 = 該 repo 尚無任何 team memory
+```
+
+`src/services/teamMemorySync/teamMemSecretGuard.ts` 中的 `scanForSecrets()` 是安全護欄——在上傳前掃描內容，防止 API key 或密碼意外同步到服務器。
+
+**代價**：「file deletion 不傳播」的設計是刻意的保守選擇，犧牲了完整的雙向同步，換取的是防止意外的大規模刪除。如果一名團隊成員誤刪了本地 team memory 目錄，不會影響服務器或其他成員。
+
+---
+
+## 二、隱藏 CLI 參數（30+）
+
+在 CLI 參數定義中，`.hideHelp()` 讓參數在 `--help` 輸出中不可見，但傳入時完全有效。以下是按類別組織的完整清單。
+
+### 多代理相關
+
+| 參數 | 說明 | 使用場景 |
+|------|------|---------|
+| `--advisor <model>` | 啟用服務器端 Advisor 模型輔助主模型決策 | 在複雜任務中讓第二個模型提供建議 |
+| `--worktree [name]` | 建立 Git Worktree 讓 session 在隔離的程式碼副本中工作 | 並行開發不同功能分支而不互相干擾 |
+| `--tmux` | 為 Worktree session 自動建立 tmux 視窗 | 在同一個終端管理多個並行 session |
+| `--tmux=classic` | 使用傳統 tmux 而非 iTerm2 原生面板 | 在非 iTerm2 環境使用 tmux 整合 |
+| `--agent-teams` | 強制啟用多 Agent 協作模式（ANT-ONLY 對外開放） | 外部用戶可以傳入此旗標，但受 `tengu_amber_flint` GrowthBook killswitch 控制 |
+| `--tasks [id]` | 進入任務管理模式，可指定任務清單 ID | ANT-ONLY，Anthropic 內部任務追蹤系統 |
+| `--teammate-mode <mode>` | 指定 teammate agent 的生成方式（tmux / in-process / auto） | 控制並行 agent 的執行模式 |
+| `--agent-type <type>` | 為 teammate agent 指定自訂類型 | 區分不同角色的 agent |
+| `--agent-id <id>` | 設定 teammate agent 的唯一識別 ID | 在 swarm 中路由訊息至特定 agent |
+| `--agent-name <name>` | 設定 teammate agent 的顯示名稱 | 改善多 agent 工作時的可讀性 |
+| `--agent-color <color>` | 設定 teammate agent 的 UI 顯示顏色 | 在終端中視覺區分不同 agent |
+| `--team-name <name>` | 設定團隊名稱以支援 Swarm 協調 | 識別屬於同一協調架構的 agent 群組 |
+
+### 除錯相關
+
+| 參數 | 說明 | 使用場景 |
+|------|------|---------|
+| `--plan-mode-required` | 強制要求先完成 Plan Mode 才能進入實作 | 在高風險任務中強制規劃步驟 |
+| `--prefill <text>` | 預填充輸入框內容但不自動送出 | 準備長提示或自動化測試 |
+| `--rewind-files <id>` | 將檔案狀態恢復到指定訊息時的快照 | 撤銷 agent 的檔案修改而不影響對話歷史 |
+| `--resume-session-at <id>` | 從指定訊息 ID 位置恢復歷史 session | 回到 session 中的特定決策點重新嘗試 |
+| `--replay-user-messages` | 重新發送使用者訊息以供確認（Print 模式） | 驗證 Print 模式的訊息重放行為 |
+| `--include-hook-events` | 在 stream-json 輸出中包含所有 Hook 生命週期事件 | 除錯 pre/post-tool hook 的觸發順序 |
+| `--include-partial-messages` | 即時包含部分訊息片段 | 分析 streaming 輸出的即時性 |
+| `--parent-session-id <id>` | 設定父 session ID 供分析追蹤 | 在 agent 層次結構中追蹤 session 關係 |
+| `--deep-link-origin` | 標記此 session 由 Deep Link 啟動 | 分析 Deep Link 啟動的 session 行為 |
+| `--deep-link-repo <slug>` | Deep Link 解析的儲存庫 Slug | 指定 Deep Link 對應的 repo 上下文 |
+
+### 模型控制
+
+| 參數 | 說明 | 使用場景 |
+|------|------|---------|
+| `--effort <level>` | 設定推理努力等級（low / medium / high / max） | 在低優先級任務中節省 Token 消耗 |
+| `--thinking <mode>` | 控制延伸思考模式（enabled / adaptive / disabled） | 強制停用或啟用 extended thinking |
+| `--max-thinking-tokens <n>` | （已棄用）設定延伸思考的最大 Token 數 | 舊版 API 使用，已被 `--effort` 取代 |
+| `--max-turns <n>` | 非互動模式下的最大 agentic 回合數 | 防止 headless session 無限循環 |
+| `--max-budget-usd <amount>` | 設定 API 呼叫的最大花費上限（美元） | 對實驗性任務設定成本上限 |
+| `--workload <tag>` | 設定工作負載計費標籤 | 追蹤不同專案或客戶的 API 成本歸屬 |
+
+### 認證相關
+
+| 參數 | 說明 | 使用場景 |
+|------|------|---------|
+| `--enable-auto-mode` | 選擇啟用自動權限批准模式 | 在受信任環境中免除每次權限確認 |
+| `--system-prompt-file <file>` | 從指定檔案讀取 System Prompt | 在 SDK 模式中注入完整的自訂 system prompt |
+| `--append-system-prompt-file <file>` | 從檔案追加額外的 System Prompt 內容 | 在標準 prompt 之後附加專案特定指令 |
+| `--permission-prompt-tool <tool>` | 指定用於權限提示的 MCP 工具 | 讓外部 MCP server 處理權限決策 |
+| `--channels <servers...>` | 註冊 MCP Server 的 Channel 通知 | 訂閱 MCP server 的事件推送 |
+| `--dangerously-load-development-channels <servers...>` | 載入未審核的開發中 Channel Server | 本地開發和測試 MCP channel 實作 |
+| `--enable-auth-status` | 在 SDK 模式下啟用認證狀態訊息 | 讓 SDK 消費者知道認證變更事件 |
+| `--assistant` | 強制進入 Assistant 模式（Agent SDK 守護程式） | 啟動 KAIROS 守護程式或 Bridge 客戶端連接 |
+
+---
+
+## 三、環境變數完整參考
+
+### 功能開關類
+
+| 環境變數 | 說明 |
+|----------|------|
+| `CLAUDE_CODE_COORDINATOR_MODE` | 啟用多 Agent 協調模式，搭配 `feature('COORDINATOR_MODE')` 編譯旗標 |
+| `CLAUDE_CODE_SIMPLE` | 精簡模式，僅保留 `BashTool`、`FileReadTool`、`FileEditTool` 三個工具 |
+| `CLAUDE_CODE_REMOTE` | 啟用遠端執行模式，並將 Node.js heap 上限設為 8GB（CCR 容器為 16GB） |
+| `CLAUDE_CODE_VERIFY_PLAN` | 啟用計畫驗證工具，確保實作符合計畫 |
+| `CLAUDE_CODE_ENABLE_LSP_TOOL` | 啟用 Language Server Protocol 工具獲得程式碼智慧感知 |
+| `CLAUDE_CODE_ENABLE_TASKS` | 啟用 Tasks v2 任務管理系統 |
+| `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` | 啟用提示建議功能，自動推薦下一步操作 |
+| `CLAUDE_CODE_ENABLE_TOKEN_USAGE_ATTACHMENT` | 將 Token 使用量附加到訊息中供追蹤 |
+| `CLAUDE_CODE_USE_POWERSHELL_TOOL` | 在 Windows 上使用 PowerShell 取代 Bash 工具 |
+| `CLAUDE_CODE_TWO_STAGE_CLASSIFIER` | 啟用兩階段權限分類器提升自動批准準確度 |
+| `CLAUDE_CODE_EFFORT_LEVEL` | 設定推理努力等級（low / medium / high / max） |
+| `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | 強制始終啟用 Effort 等級設定 |
+| `CLAUDE_CODE_UNATTENDED_RETRY` | 無人值守模式下自動重試失敗操作 |
+| `CLAUDE_CODE_DESKTOP` | 標記從桌面客戶端啟動的 session |
+| `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | 在 SDK 模式下啟用檔案檢查點支援回滾 |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | 外部用戶啟用 Agent Teams 的 opt-in 環境變數（需同時通過 `tengu_amber_flint` killswitch） |
+
+### 停用功能類
+
+| 環境變數 | 說明 |
+|----------|------|
+| `CLAUDE_CODE_DISABLE_FAST_MODE` | 停用 Fast Mode（代號 Penguins）加速輸出功能 |
+| `CLAUDE_CODE_DISABLE_THINKING` | 完全停用延伸思考功能 |
+| `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` | 停用自適應思考模式，改為固定行為 |
+| `CLAUDE_CODE_DISABLE_MOUSE` | 停用終端滑鼠支援 |
+| `CLAUDE_CODE_DISABLE_MOUSE_CLICKS` | 僅停用終端滑鼠點擊事件 |
+| `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` | 停用自動更新終端標題列 |
+| `CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL` | 停用虛擬捲動優化 |
+| `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING` | 完全停用檔案檢查點功能 |
+| `CLAUDE_CODE_SYNTH_OUTPUT_DISABLED` | 停用合成輸出工具 |
+| `CLAUDE_CODE_DISABLE_CRON` | 完全停用 cron 排程系統（覆蓋 GrowthBook 閘門） |
+
+### 除錯與效能類
+
+| 環境變數 | 說明 |
+|----------|------|
+| `CLAUDE_CODE_DUMP_SYSTEM_PROMPT` | 將完整 System Prompt 輸出至 stderr 供檢視 |
+| `CLAUDE_CODE_DUMP_AUTO_MODE` | 輸出 Auto Mode 決策規則供除錯 |
+| `CLAUDE_CODE_PROFILE_STARTUP` | 記錄啟動過程各階段耗時（對應 `profileCheckpoint()` 呼叫） |
+| `CLAUDE_CODE_PROFILE_QUERY` | 記錄查詢執行詳細效能數據 |
+| `CLAUDE_CODE_PERFETTO_TRACE` | 啟用 Perfetto 追蹤產生效能分析火焰圖 |
+| `CLAUDE_CODE_PERFETTO_WRITE_INTERVAL_S` | 設定 Perfetto 追蹤的寫入間隔秒數 |
+| `CLAUDE_CODE_FRAME_TIMING_LOG` | 記錄 UI 畫面更新的時間數據 |
+| `CLAUDE_CODE_DEBUG_REPAINTS` | 除錯模式下標記 UI 重繪區域 |
+| `CLAUDE_CODE_EXIT_AFTER_FIRST_RENDER` | 首次 UI 渲染完成後立即退出（啟動時間測試用） |
+| `CLAUDE_CODE_STALL_TIMEOUT_MS_FOR_TESTING` | 設定停滯偵測超時時間（整合測試用） |
+| `CLAUDE_CODE_JSONL_TRANSCRIPT` | 將 session 以 JSONL 格式輸出完整逐字稿 |
+| `VCR_RECORD` / `FORCE_VCR` | 啟用 VCR 錄製 / 強制 VCR 測試模式（HTTP 請求錄放） |
+
+### 模型覆蓋類
+
+| 環境變數 | 說明 |
+|----------|------|
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | 覆蓋預設 Opus 模型 ID |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | 覆蓋預設 Sonnet 模型 ID |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | 覆蓋預設 Haiku 模型 ID |
+| `ANTHROPIC_SMALL_FAST_MODEL` | 覆蓋 Fast Mode 使用的小型快速模型 |
+| `CLAUDE_CODE_AUTO_MODE_MODEL` | 覆蓋 Auto Mode 使用的模型 |
+| `CLAUDE_CODE_API_BASE_URL` | 自訂 API 端點基礎 URL |
+
+### 認證相關類
+
+| 環境變數 | 說明 |
+|----------|------|
+| `CLAUDE_CODE_USE_BEDROCK` | 使用 AWS Bedrock 作為模型提供者 |
+| `CLAUDE_CODE_USE_VERTEX` | 使用 Google Vertex AI 作為模型提供者 |
+| `CLAUDE_CODE_USE_FOUNDRY` | 使用 Foundry 作為模型提供者 |
+| `CLAUDE_CODE_ORGANIZATION_UUID` | 指定組織 UUID 供企業版存取控制 |
+| `CLAUDE_CODE_SESSION_ACCESS_TOKEN` | 直接提供 session 存取權杖 |
+| `CLAUDE_CODE_OAUTH_TOKEN` | 直接提供 OAuth Token 跳過登入流程 |
+| `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` | 提供 OAuth Refresh Token 自動續期 |
+| `CLAUDE_INTERNAL_FC_OVERRIDES` | （ANT-ONLY）以 JSON 格式覆蓋任意 Feature Flag——這是 Anthropic 內部工程師在無法等待 GrowthBook 更新時的緊急通道 |
+
+---
+
+## 四、Server 命令
+
+**CLI 的 `--help` 輸出只顯示 `claude`、`claude chat`、`claude config`。但還有五個隱藏的子命令，開啟了遠端協作的全新可能。**
+
+### `claude server` — Session 服務器
+
+`claude server` 啟動一個 HTTP/Unix Socket 服務器，讓外部程序透過 REST API 管理多個並行的 Claude Code session。
+
+| 參數 | 說明 |
+|------|------|
+| `--port <n>` | 指定 HTTP 監聽埠號 |
+| `--host <addr>` | 指定綁定地址（預設 localhost） |
+| `--auth-token <token>` | 設定 Bearer Token 認證 |
+| `--unix <path>` | 使用 Unix Domain Socket 監聽（比 TCP 更安全，適合本機 IPC） |
+| `--max-sessions <n>` | 設定最大並行 session 數 |
+| `--idle-timeout <ms>` | 設定閒置超時時間（0 = 永不過期） |
+
+**使用場景**：在 CI/CD pipeline 中以 server 模式運行 Claude Code，讓多個 pipeline stage 共享同一個 session 上下文，避免每次啟動的冷啟動開銷。也適合用於將 Claude Code 整合進自訂 IDE 或腳本工具中。
+
+### `claude ssh` — 遠端主機執行
+
+```bash
+claude ssh <host> [dir]
+```
+
+`claude ssh` 透過 SSH 在遠端主機上執行 Claude Code，並將 I/O 橋接回本地終端。不需要在遠端主機上安裝額外的 bridge 軟體——SSH 本身提供傳輸層。
+
+**使用場景**：在強算力的遠端開發機上執行 Claude Code，而本地只負責輸入和顯示。特別適合需要大量計算（如跑測試套件）的任務。
+
+### `claude remote-control` / `claude rc` — 連接遠端 Bridge Session
+
+```bash
+claude remote-control  # 等同於 claude rc
+claude open <cc-url>   # 連接到 Claude Code Server（內部使用）
+claude assistant [sessionId]  # 作為客戶端連接 Bridge Session
+```
+
+這三個命令是 Bridge Mode 的客戶端介面。`claude remote-control` 顯示可用的遠端 session 清單，`claude assistant [sessionId]` 連接到特定 session。Bridge 使用 CloudControl Relay（CCR）作為中繼——本地機器的 Claude Code 作為 server，行動裝置或瀏覽器作為 client，CCR 負責路由和認證。
+
+**使用場景**：在會議中從手機接管筆電上正在進行的 Claude Code session；或讓同事從他們的機器連接到你的 session 進行結對程式設計。
+
+:::note[認證限制]
+`claude remote-control` 要求 claude.ai OAuth 訂閱（`isClaudeAISubscriber() = true`）且必須使用完整 scope 的登入 token。API key、Bedrock、Vertex 配置不支援遠端控制，因為 CCR 需要 OAuth token 進行端對端認證。
+:::
+
+---
+
+## 關鍵要點
+
+- **Feature flag 是安全網，不是彩蛋**：GrowthBook 的三層機制（編譯期死碼消除、執行期 GrowthBook 閘門、使用者屬性定向）讓 Anthropic 能安全地漸進推出功能
+- **隱藏 CLI 參數功能齊全**：30+ 個以 `.hideHelp()` 隱藏的參數，涵蓋多代理協調、除錯診斷、模型控制、認證管理
+- **Coordinator Mode 改變了 orchestration 的粒度**：透過 `CLAUDE_CODE_COORDINATOR_MODE=1` 啟用，讓 Claude Code 成為純粹的 orchestrator，與 Ch.07 的 Swarm 架構共存但責任更清晰
+- **BUDDY 的確定性設計揭示了工程嚴謹性**：用 seeded PRNG 確保 companion 跨 session 一致，SALT 版本化讓 Anthropic 可控重置
+- **Agent Triggers 的 cron jitter 是分散式系統思考**：刻意避開整點/半點觸發，將隱性的全球流量分散問題透過 API 設計解決
+- **Team Memory 的「不傳播刪除」是保守的安全選擇**：犧牲完整雙向同步，防止意外的大規模知識遺失
+- **Server 命令開啟了 Claude Code 的可程式化邊界**：`claude server` 的 REST API 讓 Claude Code 可以作為 CI/CD 基礎設施的一部分
+
+---
+
+## 承先啟後
+
+隱藏功能中有一個特別重要的：system prompt 的完整內容。Ch.13 把分析文件轉化成可操作的工程知識。
