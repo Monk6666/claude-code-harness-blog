@@ -1,0 +1,207 @@
+---
+title: "設計模式總結與啟示"
+subtitle: "Design Patterns Summary & Takeaways"
+description: "從 Claude Code 的架構中提煉出的關鍵設計模式，以及對 AI Agent 開發者的實踐建議"
+order: 10
+tags: ["設計模式", "最佳實踐", "架構", "總結"]
+---
+
+## 從 Claude Code 學到的設計模式
+
+經過前 9 章的深入分析，讓我們提煉出 Claude Code 架構中最重要的設計模式，以及它們對 AI Agent 開發的啟示。
+
+## Pattern 1: Generator/Async Iterator
+
+**問題：** AI 代理的執行是串流式的 — API 回應逐步到達，工具可能長時間執行，UI 需要即時更新。
+
+**Claude Code 的做法：**
+
+```typescript
+async function* query(params): AsyncGenerator<Message, Terminal> {
+  for await (const event of apiStream) {
+    yield event;  // 即時產出，不等待完成
+    if (event.type === 'tool_use') {
+      yield* runTools(event);  // 委派給工具執行 generator
+    }
+  }
+}
+```
+
+**為什麼不用 Callback？**
+- Callback 沒有背壓控制 — 生產者可能淹沒消費者
+- Callback 難以組合 — 沒有 `yield*` 的委派語義
+- Callback 難以取消 — generator 可以用 `return()` 外部取消
+
+<Callout type="tip">
+如果你的 AI 代理需要串流式執行，優先考慮 async generator 而不是 callback 或 event emitter。它在型別安全、組合性和取消語義上都更優越。
+</Callout>
+
+## Pattern 2: Cache-Sharing Between Contexts
+
+**問題：** 多代理系統中，每個代理呼叫 API 都需要傳送完整的 system prompt + tools，成本極高。
+
+**Claude Code 的做法：**
+
+```typescript
+// 1. 父代理儲存 cache-safe params
+saveCacheSafeParams({ systemPrompt, tools, model, messages });
+
+// 2. 子代理取得相同的 params
+const params = getLastCacheSafeParams();
+
+// 3. 因為前綴完全一致，prompt cache 命中率 ~100%
+// 結果：子代理的 system prompt 成本只有 10%
+```
+
+**架構約束：** 子代理不能自訂 system prompt 或 tools — 這是刻意的，犧牲彈性換取成本節省。
+
+<Callout type="important">
+在設計多代理系統時，**成本是第一約束**。一個沒有 cache sharing 的多代理系統，成本會隨代理數量線性增長。Cache sharing 讓成本接近常數。
+</Callout>
+
+## Pattern 3: Layered Permission with Racing
+
+**問題：** 權限檢查既要安全又要快速，不同場景需要不同的審批方式。
+
+**Claude Code 的做法：**
+
+```typescript
+// 三條路徑同時競賽
+const decision = await Promise.race([
+  userDialog.prompt(),       // 使用者判斷（慢但可靠）
+  hookSystem.evaluate(),     // Hook 腳本（中等速度）
+  mlClassifier.classify(),   // ML 分類器（快但只處理安全案例）
+]);
+```
+
+**精妙之處：** ML 分類器只對「安全」的操作返回結果。對「不確定」的操作，它返回一個永遠不 resolve 的 Promise — 這讓 `Promise.race` 自動 fallback 到其他路徑。
+
+## Pattern 4: Fail-Open Services
+
+**問題：** AI 代理依賴多個外部服務（API、遠端設定、分析系統），任何一個失敗都不應該讓代理完全停止。
+
+**Claude Code 的做法：**
+
+```typescript
+// Policy Limits 服務 — 典型的 fail-open 設計
+try {
+  const limits = await fetchPolicyLimits({ timeout: 5000 });
+  applyLimits(limits);
+} catch (error) {
+  // 服務不可用 → 使用預設值，不阻塞
+  console.warn('Policy limits unavailable, using defaults');
+  applyDefaultLimits();
+}
+```
+
+**原則：** 輔助服務（遙測、分析、設定）的失敗不應該阻塞核心功能（讀寫檔案、執行命令）。
+
+## Pattern 5: Lazy Schema & Feature Gating
+
+**問題：** 大型工具集合在啟動時全部初始化會很慢，而且某些功能可能不需要。
+
+**Claude Code 的做法：**
+
+```typescript
+// 延遲 schema 載入 — 只在使用時才實例化
+const schema = lazySchema(() => z.object({
+  file_path: z.string(),
+  content: z.string(),
+}));
+
+// Feature gating — 編譯時死程式碼消除
+if (feature('COORDINATOR_MODE')) {
+  registerTool(TeamCreateTool);
+  registerTool(TeamDeleteTool);
+}
+// 如果 feature flag 關閉，bundler 會完全移除這段程式碼
+```
+
+## Pattern 6: Memoize + Invalidate
+
+**問題：** 某些昂貴的操作（Git 狀態、CLAUDE.md 解析）在同一 session 中結果很少變化，但需要能感知到外部變更。
+
+**Claude Code 的做法：**
+
+```typescript
+// 層次化的 memoization 策略
+const getGitStatus = memoize(async () => {
+  return execSync('git status --short');
+});
+// → Session 級快取，不會被失效（Git 狀態是快照）
+
+const loadHooks = memoize(async () => {
+  return parseHooksConfig('.claude/hooks.json');
+});
+setupFileWatcher('.claude/hooks.json', () => loadHooks.invalidate());
+// → File watcher 驅動失效
+```
+
+**核心洞見：** 不同的資料有不同的快取語義。有些資料是「快照」（取一次就夠），有些是「活的」（需要響應外部變更）。
+
+## Pattern 7: Subprocess + JSON Protocol
+
+**問題：** 允許使用者擴展代理行為，但不能讓擴展程式碼影響核心穩定性。
+
+**Claude Code 的做法（Hook System）：**
+
+```
+Harness ─── spawn ──→ User Script
+         ← stdout ──  { "decision": "allow" }
+```
+
+- Hook 是獨立的子程序，崩潰不影響主程序
+- 通訊協議是 JSON，語言無關
+- 超時機制防止 hang
+- 環境變數傳遞上下文
+
+## 綜合：Harness Engineering Checklist
+
+如果你要建立自己的 AI Agent 系統，以下是從 Claude Code 學到的設計清單：
+
+### 安全性
+- [ ] 所有外部操作都通過受控的工具介面
+- [ ] 工具預設是 fail-closed（不可並行、有副作用）
+- [ ] 分層權限：自動 → Hook → ML 分類 → 使用者確認
+- [ ] 拒絕追蹤防止無限重試
+
+### 效能
+- [ ] Prompt cache sharing 在多代理間共享
+- [ ] 唯讀工具並行，有副作用工具排他
+- [ ] 串流式執行，不等待完整回應
+- [ ] Memoization + invalidation 策略
+
+### 擴展性
+- [ ] Hook 系統提供生命週期擴展點
+- [ ] Skill 系統允許使用者定義專家行為
+- [ ] MCP 協議接入外部工具和資源
+- [ ] Plugin 錯誤隔離，不影響核心
+
+### 可觀測性
+- [ ] 工具有型別化的進度回報
+- [ ] 任務有完整的生命週期追蹤
+- [ ] 成本和 token 消耗即時統計
+- [ ] 遙測整合（OpenTelemetry）
+
+### 韌性
+- [ ] 上下文壓縮防止窗口溢出
+- [ ] Fail-open 設計，輔助服務失敗不阻塞
+- [ ] Graceful shutdown 清理資源
+- [ ] 雙層快取（記憶體 + 磁碟）跨 session 保持
+
+## 對未來的展望
+
+Claude Code 的 Harness Engineering 展示了 AI 代理工程的一個成熟範式。但這個領域仍在快速演進：
+
+1. **更細粒度的權限** — 不只是「允許/拒絕」，而是「允許但限制範圍」
+2. **更智慧的上下文管理** — 預測性地載入相關上下文，而不是被動壓縮
+3. **跨代理學習** — 代理從過去的 session 中學習效率模式
+4. **正式驗證** — 對關鍵操作（如生產部署）進行形式化安全驗證
+
+## 結語
+
+<Callout type="important">
+Harness Engineering 的核心不是限制 AI 的能力，而是**以工程的嚴謹度來釋放 AI 的能力**。Claude Code 展示了一個系統如何在給予 AI 巨大自由度的同時，保持安全、效率和可控性。這不只是一個產品的架構 — 這是未來所有 AI Agent 系統的設計藍圖。
+</Callout>
+
+感謝閱讀到這裡。希望這份教學日誌能幫助你在自己的 AI 專案中應用這些工程模式。

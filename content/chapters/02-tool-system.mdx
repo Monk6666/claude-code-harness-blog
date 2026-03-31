@@ -1,0 +1,224 @@
+---
+title: "Tool System — 工具即一等公民"
+subtitle: "Tool System — Tools as First-Class Citizens"
+description: "深入解析 Claude Code 的工具定義、驗證、執行生命週期，以及 buildTool 安全預設值模式"
+order: 2
+tags: ["Tool", "Zod", "TypeScript", "設計模式"]
+---
+
+## 為什麼工具是核心？
+
+在 Claude Code 中，LLM 與真實世界的每一次互動都必須通過**工具（Tool）** — 讀取檔案是工具、編輯檔案是工具、執行 bash 命令是工具、甚至派遣子代理也是工具。
+
+這不是偶然的設計，而是 Harness Engineering 的核心原則：
+
+> **所有副作用都必須經過受控的介面。** LLM 不能直接操作任何系統，它只能「呼叫工具」，而工具的執行由 harness 完全掌控。
+
+## Tool 型別定義
+
+Claude Code 的工具系統以 TypeScript 泛型為基礎，定義在 `src/Tool.ts`：
+
+```typescript
+// src/Tool.ts — 核心工具介面（真實型別定義，50+ 方法）
+export type Tool<
+  Input extends AnyObject = AnyObject,
+  Output = unknown,
+  P extends ToolProgressData = ToolProgressData,
+> = {
+  name: string
+  aliases?: string[]                    // 舊名稱向後相容
+  searchHint?: string                   // ToolSearch 搜尋提示
+  readonly inputSchema: Input           // Zod schema
+  readonly inputJSONSchema?: ToolInputJSONSchema  // JSON Schema（給 API）
+
+  // 核心生命週期
+  call(
+    args: z.infer<Input>,
+    context: ToolUseContext,
+    canUseTool: CanUseToolFn,
+    parentMessage: AssistantMessage,
+    onProgress?: ToolCallProgress<P>,
+  ): Promise<ToolResult<Output>>
+
+  description(
+    input: z.infer<Input>,
+    options: {
+      isNonInteractiveSession: boolean
+      toolPermissionContext: ToolPermissionContext
+      tools: Tools
+    },
+  ): Promise<string>
+
+  // 並行與安全元資料（input-dependent！）
+  isConcurrencySafe(input: z.infer<Input>): boolean
+  isReadOnly(input: z.infer<Input>): boolean
+  isDestructive?(input: z.infer<Input>): boolean
+  isEnabled(): boolean
+  interruptBehavior?(): 'cancel' | 'block'
+
+  // 權限
+  checkPermissions(input, context): Promise<PermissionDecision>
+  toAutoClassifierInput(input: z.infer<Input>): string
+
+  // 結果渲染（React/Ink TUI）
+  renderToolResultMessage(output, verbose): ReactNode
+  renderToolUseMessage(input, isSuccess?): ReactNode | null
+  // ... 還有 20+ 個渲染、分析、快取相關方法
+}
+```
+
+<Callout type="tip">
+注意 `isReadOnly` 和 `isConcurrencySafe` 的參數是 `input` 而非無參數。這意味著**同一個工具在不同輸入下可以有不同的並行策略**。例如 `BashTool` 執行 `ls` 是唯讀的，但執行 `rm` 不是。
+</Callout>
+
+<Callout type="important">
+注意三個布林方法：`isReadOnly`、`isDestructive`、`isConcurrencySafe`。它們決定了工具在並行執行時的排程策略（Ch.7 詳述）。
+</Callout>
+
+## buildTool — 安全預設值模式
+
+Claude Code 使用 **Fail-Closed** 預設值：如果工具開發者忘記設定某個屬性，系統會採用最保守的行為。
+
+```typescript
+// src/Tool.ts — buildTool 的實際實現
+const TOOL_DEFAULTS = {
+  isEnabled: () => true,
+  isConcurrencySafe: (_input?: unknown) => false,    // 預設：不可並行
+  isReadOnly: (_input?: unknown) => false,           // 預設：有副作用
+  isDestructive: (_input?: unknown) => false,
+  checkPermissions: (input) =>
+    Promise.resolve({ behavior: 'allow', updatedInput: input }),
+  toAutoClassifierInput: (_input?: unknown) => '',   // 預設：不參與自動分類
+  userFacingName: (_input?: unknown) => '',
+}
+
+export function buildTool<D extends AnyToolDef>(def: D): BuiltTool<D> {
+  return {
+    ...TOOL_DEFAULTS,
+    userFacingName: () => def.name,
+    ...def,            // 使用者定義覆蓋預設值
+  } as BuiltTool<D>
+}
+```
+
+<Callout type="tip">
+這是一個經典的安全工程模式：**Fail-Closed Default**。如果你忘記聲明一個工具是可以並行的，它會被當作不可並行處理 — 寧可犧牲效能也不冒正確性的風險。
+</Callout>
+
+## 工具生命週期
+
+每次 LLM 呼叫工具時，會經歷以下流程：
+
+<Mermaid chart={`
+sequenceDiagram
+    participant LLM as Claude LLM
+    participant H as Harness
+    participant T as Tool
+    participant P as Permission System
+    participant U as User/Hook
+
+    LLM->>H: tool_use: { name, input }
+    H->>T: validateInput(input)
+    T-->>H: Valid / Invalid
+
+    alt Invalid
+        H-->>LLM: Error result
+    end
+
+    H->>T: checkPermissions(input, context)
+    T-->>H: Allow / Deny / Defer
+
+    alt Defer
+        H->>P: canUseTool(tool, input)
+        P-->>H: Ask user
+        H->>U: Permission dialog
+        U-->>H: Allow / Deny
+    end
+
+    H->>T: call(input, context, abort, onProgress)
+
+    loop During execution
+        T-->>H: Progress updates
+        H-->>LLM: Streaming progress
+    end
+
+    T-->>H: Output
+    H->>T: mapToolResultToToolResultBlockParam(output)
+    T-->>H: ToolResultBlock
+    H-->>LLM: tool_result
+`} />
+
+## Zod + JSON Schema 雙軌驗證
+
+工具輸入同時使用兩套 schema：
+
+1. **Zod Schema** — TypeScript 端的型別安全驗證
+2. **JSON Schema** — 傳給 Anthropic API，讓 LLM 知道如何正確格式化輸入
+
+```typescript
+// 例：FileReadTool 的輸入 schema
+const inputSchema = z.object({
+  file_path: z.string().describe("The absolute path to the file to read"),
+  offset: z.number().optional().describe("Line number to start reading from"),
+  limit: z.number().optional().describe("Number of lines to read"),
+});
+```
+
+## lazySchema — 延遲載入模式
+
+某些工具之間存在循環依賴。為了避免模組初始化時的死鎖，Claude Code 使用了延遲 schema 載入：
+
+```typescript
+// src/Tool.ts
+function lazySchema<T>(factory: () => ZodSchema<T>): ZodSchema<T> {
+  let cached: ZodSchema<T> | null = null;
+  return {
+    parse(data) {
+      if (!cached) cached = factory();
+      return cached.parse(data);
+    },
+    // ... 其他 Zod 方法的代理
+  };
+}
+```
+
+這讓工具可以在「被使用時」才真正實例化 schema，而不是在模組載入時。
+
+## 進度回報機制
+
+工具執行期間可以通過 `onProgress` callback 回報即時進度：
+
+```typescript
+type ToolCallProgress<P> = (progress: P) => void;
+
+// 例：BashTool 回報 stdout 輸出
+async function call(input, context, abort, onProgress) {
+  const proc = spawn(input.command, { signal: abort });
+  proc.stdout.on('data', (chunk) => {
+    onProgress({ type: 'stdout', data: chunk.toString() });
+  });
+  // ...
+}
+```
+
+進度訊息會被即時串流回 LLM，讓它在工具尚未完成時就能「看到」中間結果。
+
+## 實際工具清單
+
+Claude Code 內建超過 30 個工具，涵蓋了軟體工程的各個面向：
+
+| 類別 | 工具 | 說明 |
+|------|------|------|
+| 檔案操作 | `FileReadTool`, `FileEditTool`, `FileWriteTool` | 讀取、編輯、寫入檔案 |
+| 搜尋 | `GlobTool`, `GrepTool` | 檔名搜尋、內容搜尋 |
+| 執行 | `BashTool` | Shell 命令執行 |
+| 代理 | `AgentTool`, `SendMessageTool` | 子代理派遣與通訊 |
+| 任務 | `TaskCreateTool`, `TaskUpdateTool` | 任務管理 |
+| 技能 | `SkillTool` | 技能執行 |
+| MCP | `MCPTool`, `ListMcpResourcesTool` | MCP 協議工具 |
+
+## 關鍵要點
+
+<Callout type="important">
+Claude Code 的 Tool System 展現了一個核心設計理念：**透過泛型介面標準化所有外部互動，用 fail-closed 預設值保證安全，用雙軌 schema 驗證保證正確性。** 這是 Harness Engineering 的基石 — 沒有受控的工具層，就無法建立可靠的 AI 代理。
+</Callout>

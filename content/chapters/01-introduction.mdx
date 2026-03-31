@@ -1,0 +1,136 @@
+---
+title: "什麼是 Harness Engineering？"
+subtitle: "What is Harness Engineering?"
+description: "從 ChatBot 到 Agent 的演進 — 為什麼我們需要「駕馭工程」來讓 LLM 成為可靠的工程代理"
+order: 1
+tags: ["概念", "架構", "總覽"]
+---
+
+## 從聊天機器人到工程代理
+
+2024-2025 年，AI 編程助手經歷了一場質變。早期的 AI 編程工具（如 GitHub Copilot）僅提供「自動完成」功能 — 它們在你的游標位置預測下幾行程式碼。但 Claude Code 代表了一種全新的範式：**自主工程代理**。
+
+這個代理可以：
+- 直接在你的終端中讀寫檔案
+- 執行 shell 命令
+- 搜尋整個程式碼庫
+- 同時派遣多個子代理處理不同任務
+- 自主決定下一步行動
+
+但讓一個 LLM「自主行動」聽起來很可怕。如果它刪除了重要檔案？如果它執行了危險命令？如果它無限迴圈消耗 token？
+
+這就是 **Harness Engineering**（駕馭工程）的核心挑戰。
+
+## Harness Engineering 定義
+
+> **Harness Engineering** 是一套工程實踐，目標是在 LLM 和真實世界之間建立安全、高效、可控的介面層，使 AI 模型能可靠地操作真實系統。
+
+如同馬韁（harness）讓騎手控制馬匹的力量和方向，Harness Engineering 讓開發者控制 LLM 的能力和邊界。
+
+核心原則包括：
+
+1. **工具即一等公民** — 所有與外部世界的互動都通過標準化的工具介面
+2. **分層權限** — 從自動批准到人工確認，多層安全機制
+3. **可觀測性** — 每個操作都有明確的輸入、輸出和進度回報
+4. **容錯設計** — 服務降級不會導致系統崩潰
+5. **成本意識** — Prompt Cache 共享等機制控制 API 成本
+
+## Claude Code 架構鳥瞰
+
+Claude Code 的整體架構可以分為以下核心子系統：
+
+<Mermaid chart={`
+graph TB
+    User[使用者輸入] --> QL[Query Loop 主迴圈]
+    QL --> TS[Tool System 工具系統]
+    QL --> AO[Agent Orchestration 代理編排]
+
+    TS --> PS[Permission System 權限系統]
+    TS --> HS[Hook System 鉤子系統]
+
+    AO --> FA[Forked Agent 子代理]
+    AO --> CS[Cache Sharing 快取共享]
+
+    PS --> IH[Interactive Handler 互動式]
+    PS --> BC[Bash Classifier ML分類器]
+
+    QL --> CM[Context Management 上下文管理]
+    CM --> CP[Compaction 壓縮]
+    CM --> MM[Memory CLAUDE.md 記憶]
+
+    QL --> SM[State Management 狀態管理]
+    SM --> AS[AppState Store]
+
+    QL --> SK[Skills 技能]
+    QL --> PL[Plugins/MCP 插件]
+    QL --> TK[Task System 任務系統]
+
+    style QL fill:#6366f1,color:#fff
+    style TS fill:#818cf8,color:#fff
+    style AO fill:#818cf8,color:#fff
+    style PS fill:#a78bfa,color:#fff
+    style HS fill:#a78bfa,color:#fff
+`} />
+
+## 為什麼需要 Harness？
+
+讓我們用一個實際場景說明。當你在終端輸入：
+
+```
+claude "幫我重構 auth 模組，加入 OAuth2 支援"
+```
+
+Claude Code 需要：
+
+1. **理解上下文** — 讀取專案結構、現有的 auth 實作、CLAUDE.md 中的慣例
+2. **規劃行動** — 決定需要修改哪些檔案、建立哪些新檔案
+3. **安全執行** — 每個檔案修改和命令執行都需要適當的權限檢查
+4. **平行處理** — 多個讀取操作可以同時進行，寫入操作需要排他
+5. **串流回報** — 即時顯示進度，不讓使用者等待完整結果
+6. **成本控制** — 子代理共享 prompt cache，避免重複的 token 消耗
+
+每一項都對應到一個具體的子系統。接下來的章節將逐一深入解析。
+
+## 啟動流程
+
+當你在終端輸入 `claude` 時，程式碼的執行路徑如下：
+
+```typescript
+// cli.tsx → init.ts → main.tsx
+// 1. cli.tsx: 解析命令列參數、偵測 stdin 管道
+// 2. init.ts: 初始化設定、載入 plugins、建立 MCP 連線
+// 3. main.tsx: 啟動 React/Ink TUI、進入 Query Loop 主迴圈
+```
+
+真實的啟動過程會並行載入多個子系統：
+
+```typescript
+// init.ts 中的並行初始化
+const [settings, plugins, mcpClients] = await Promise.all([
+  getInitialSettings(),        // 載入使用者設定
+  loadAllPlugins(options),     // 載入所有 plugins
+  connectMCPServers(config),   // 建立 MCP 連線
+])
+```
+
+## 原始碼導覽
+
+Claude Code 的原始碼組織清晰地反映了這些子系統：
+
+| 目錄 | 對應子系統 | 章節 |
+|------|-----------|------|
+| `src/Tool.ts`, `src/tools/` | 工具系統 | Ch.2 |
+| `src/tools/AgentTool/` | 代理編排 | Ch.3 |
+| `src/hooks/toolPermission/` | 權限系統 | Ch.4 |
+| `src/utils/hooks.ts` | Hook 系統 | Ch.5 |
+| `src/context.ts` | 上下文管理 | Ch.6 |
+| `src/query.ts` | 主迴圈與並行 | Ch.7 |
+| `src/skills/`, `src/plugins/` | 技能與插件 | Ch.8 |
+| `src/state/` | 狀態管理 | Ch.9 |
+| `src/constants/prompts.ts` | 系統提示詞設計 | Ch.11 |
+
+## 關鍵要點
+
+<Callout type="important">
+Harness Engineering 的核心思維是：**LLM 是強大但不可信的執行者**。我們需要建立一套精密的框架來引導它的能力、約束它的邊界、並在出錯時提供安全網。Claude Code 的架構正是這一思維的產品級實現。
+</Callout>

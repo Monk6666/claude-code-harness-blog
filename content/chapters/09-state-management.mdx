@@ -1,0 +1,265 @@
+---
+title: "State Management — 狀態流"
+subtitle: "State Management — Reactive State Architecture"
+description: "AppState Store 的反應式設計、DeepImmutable 型別安全、依賴注入模式、以及設定變更傳播"
+order: 9
+tags: ["State", "Store", "Immutable", "DI"]
+---
+
+## 為什麼 AI 代理需要狀態管理？
+
+Claude Code 不是一個無狀態的請求-回應系統。在一個工作 session 中，它需要追蹤：
+- 當前的對話歷史
+- 所有正在執行的背景任務
+- 工具權限的即時狀態
+- MCP 伺服器連線
+- 使用者設定的變更
+- Token 消耗和成本
+
+這些狀態需要在多個元件間同步，而且需要即時反映在 UI 上。
+
+## AppState Store — 簡單而有效
+
+Claude Code 沒有使用 Redux、Zustand 或其他狀態管理庫。它使用了一個極簡的自製 Store：
+
+```typescript
+// src/state/store.ts
+type Store<T> = {
+  getState(): T;
+  setState(updater: (prev: T) => T): void;
+  subscribe(listener: () => void): () => void;
+};
+
+function createStore<T>(initialState: T): Store<T> {
+  let state = initialState;
+  const listeners = new Set<() => void>();
+
+  return {
+    getState: () => state,
+    setState: (updater) => {
+      state = updater(state);
+      listeners.forEach(fn => fn());
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+```
+
+<Callout type="tip">
+這個 Store 的設計刻意簡單 — 只有 `getState`、`setState`、`subscribe` 三個方法。沒有 middleware、沒有 selector、沒有 action 分派。在 AI 代理的場景中，這種簡單性是一個優勢：更少的抽象 = 更少的 bug = 更容易除錯。
+</Callout>
+
+## AppState 結構
+
+```typescript
+// src/state/AppStateStore.ts — 簡化版
+type AppState = {
+  // 設定
+  settings: SettingsJson;
+  verbose: boolean;
+  mainLoopModel: ModelSetting;
+
+  // 對話
+  messages: Message[];
+  isBriefOnly: boolean;
+
+  // MCP
+  mcp: {
+    clients: MCPServerConnection[];
+    commands: Command[];
+  };
+
+  // 任務
+  tasks: Map<string, TaskState>;
+
+  // 權限
+  toolPermissionContext: ToolPermissionContext;
+  classifierApprovals: Map<string, PermissionDecision>;
+  denialTracking: DenialTrackingState;
+
+  // UI
+  expandedView: 'none' | 'tasks' | 'teammates';
+
+  // ... 更多欄位
+};
+```
+
+## DeepImmutable — 型別級不可變性
+
+為了防止意外的狀態突變，Claude Code 使用了 `DeepImmutable` 型別：
+
+```typescript
+type DeepImmutable<T> = {
+  readonly [K in keyof T]: T[K] extends object
+    ? DeepImmutable<T[K]>
+    : Readonly<T[K]>;
+};
+
+// 使用
+function getState(): DeepImmutable<AppState> {
+  return state;  // TypeScript 確保返回值是完全唯讀的
+}
+
+// 嘗試修改會在編譯時報錯
+const state = store.getState();
+state.messages.push(msg);  // ❌ TypeScript Error!
+
+// 正確的方式是透過 setState
+store.setState(prev => ({
+  ...prev,
+  messages: [...prev.messages, msg],
+}));
+```
+
+<Callout type="note">
+`DeepImmutable` 是純粹的編譯期檢查，運行時沒有任何開銷。它不像 Immutable.js 那樣使用特殊的資料結構，而是利用 TypeScript 的型別系統來防止突變。
+</Callout>
+
+## 依賴注入模式
+
+Claude Code 使用 `ToolUseContext` 作為依賴注入的載體，將所有執行期依賴集中傳遞：
+
+```typescript
+type ToolUseContext = {
+  // 狀態存取
+  getState: () => DeepImmutable<AppState>;
+  setState: (updater: (prev: AppState) => AppState) => void;
+
+  // 權限
+  canUseTool: CanUseToolFn;
+
+  // 進度回報
+  onProgress: (progress: ToolCallProgress) => void;
+
+  // 取消信號
+  abortSignal: AbortSignal;
+
+  // 工具查找
+  lookupTool: (name: string) => Tool | undefined;
+
+  // Session 資訊
+  sessionId: string;
+  projectRoot: string;
+};
+```
+
+每個工具的 `call` 方法都接收這個 context，而不是直接引用全域變數。這使得：
+- 工具可以在不同的上下文中執行（主代理 vs 子代理）
+- 權限可以按需注入（不同的 `canUseTool` 實現）
+- 測試更容易（可以 mock context）
+
+## Settings 變更傳播
+
+<Mermaid chart={`
+graph TD
+    User[使用者修改設定] --> SP[Settings Provider]
+    SP --> AS[AppState.settings]
+    AS --> L1[Listener: Permission System]
+    AS --> L2[Listener: UI Components]
+    AS --> L3[Listener: Tool Registry]
+
+    L1 --> Update1[更新權限規則]
+    L2 --> Update2[重新渲染]
+    L3 --> Update3[啟用/禁用工具]
+
+    style User fill:#6366f1,color:#fff
+`} />
+
+```typescript
+// 設定變更觸發重新計算
+store.subscribe(() => {
+  const newSettings = store.getState().settings;
+
+  // 重新計算權限上下文
+  updatePermissionContext(newSettings);
+
+  // 重新評估工具可用性
+  refreshToolAvailability(newSettings);
+});
+```
+
+## Task State 管理
+
+任務使用 `Map<string, TaskState>` 管理，有明確的狀態轉移：
+
+```
+pending → running → completed
+                  → failed
+                  → killed
+```
+
+```typescript
+// 更新任務狀態
+store.setState(prev => ({
+  ...prev,
+  tasks: new Map(prev.tasks).set(taskId, {
+    ...prev.tasks.get(taskId)!,
+    status: 'completed',
+    endTime: Date.now(),
+  }),
+}));
+```
+
+## 與 React 整合
+
+Claude Code 的 UI 使用 Ink（React for CLI）。AppState 通過 React Context 和 hooks 整合：
+
+```typescript
+// Provider
+function AppStateProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState(store.getState);
+
+  useEffect(() => {
+    return store.subscribe(() => {
+      setState(store.getState());
+    });
+  }, []);
+
+  return (
+    <AppStateContext.Provider value={state}>
+      {children}
+    </AppStateContext.Provider>
+  );
+}
+
+// Consumer hook
+function useAppState() {
+  return useContext(AppStateContext);
+}
+```
+
+## 雙層快取設計
+
+某些服務（如 Policy Limits）使用雙層快取：
+
+| 層級 | 媒介 | 速度 | 生命週期 |
+|------|------|------|---------|
+| L1 | 記憶體（AppState） | 即時 | Session |
+| L2 | 磁碟檔案 | 毫秒 | 跨 Session |
+
+```typescript
+// 先查記憶體
+let limits = getFromMemory('policyLimits');
+
+if (!limits) {
+  // 再查磁碟
+  limits = await readFromDisk('~/.claude/cache/policy-limits.json');
+
+  if (!limits) {
+    // 最後查遠端
+    limits = await fetchFromAPI('/policy-limits');
+    await saveToDisk(limits);
+  }
+
+  saveToMemory('policyLimits', limits);
+}
+```
+
+## 關鍵要點
+
+<Callout type="important">
+Claude Code 的狀態管理展示了一個反直覺的決策：**在 2026 年的專案中使用自製的極簡 Store，而不是成熟的狀態管理庫**。這是因為 AI 代理的狀態管理需求與傳統 web app 非常不同 — 它更像是一個有狀態的 server 而不是互動式 UI。簡單的 pub/sub + immutable 更新已經足夠，額外的抽象只會增加認知負擔。
+</Callout>

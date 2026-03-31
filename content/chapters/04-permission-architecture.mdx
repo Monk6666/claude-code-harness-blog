@@ -1,0 +1,183 @@
+---
+title: "Permission Architecture — 分層權限"
+subtitle: "Permission Architecture — Layered Security"
+description: "四層權限模型、三條平行審批路徑、ML 自動分類器、以及拒絕升級機制的完整解析"
+order: 4
+tags: ["權限", "安全", "Classifier", "Handler"]
+---
+
+## 為什麼權限是最困難的問題？
+
+AI 代理的權限設計面臨一個根本性矛盾：
+
+- **太嚴格** → 每個操作都問使用者，代理變成「需要人工確認的腳本」
+- **太寬鬆** → 代理可能執行危險操作，造成不可逆的傷害
+
+Claude Code 的解決方案是 **分層權限系統** — 不同層級的操作對應不同的審批流程，同時透過 ML 分類器加速安全操作的審批。
+
+## 四層權限模型
+
+<Mermaid chart={`
+graph TD
+    TU[Tool Use Request] --> L1[Layer 1: Tool-level]
+    L1 -->|Tool-specific rules| L2[Layer 2: Global Rules]
+    L2 -->|Cross-cutting rules| L3[Layer 3: Interactive]
+    L3 -->|User prompt| Decision{Decision}
+
+    L1 -->|Auto-allow| Allow[Allow]
+    L2 -->|Match allow rule| Allow
+    L3 -->|Classifier auto-approve| Allow
+    L3 -->|User approve| Allow
+
+    L1 -->|Tool deny| Deny[Deny]
+    L2 -->|Match deny rule| Deny
+    L3 -->|User deny| Deny
+    Decision --> Allow
+    Decision --> Deny
+
+    style TU fill:#6366f1,color:#fff
+    style Allow fill:#22c55e,color:#fff
+    style Deny fill:#ef4444,color:#fff
+`} />
+
+### Layer 1: Tool-level Permission
+
+每個工具可以定義自己的權限邏輯：
+
+```typescript
+// 例：FileReadTool 的權限 — 只讀操作，通常自動允許
+checkPermissions(input) {
+  if (isPathOutsideProject(input.file_path)) {
+    return { behavior: 'ask', reason: 'File is outside project directory' };
+  }
+  return { behavior: 'allow' };
+}
+```
+
+### Layer 2: Global Rules Engine
+
+全域規則引擎基於 `PermissionContext`：
+
+```typescript
+type PermissionContext = {
+  mode: 'default' | 'plan' | 'bypass';
+  alwaysAllowRules: ToolPermissionRulesBySource;
+  alwaysDenyRules: ToolPermissionRulesBySource;
+  alwaysAskRules: ToolPermissionRulesBySource;
+  shouldAvoidPermissionPrompts?: boolean;  // 背景代理
+};
+```
+
+使用者可以在 settings 中配置規則：
+- `alwaysAllow: ["FileReadTool", "GlobTool"]` — 這些工具永遠不問
+- `alwaysDeny: ["BashTool:rm -rf *"]` — 這些命令永遠禁止
+
+### Layer 3: Interactive & Automated
+
+當前兩層無法做出決定時，進入互動層。這裡有三條平行路徑同時競賽：
+
+## 三條平行審批路徑
+
+```typescript
+// src/hooks/toolPermission/ — 三條路徑同時競賽
+// 每條路徑是一個獨立的 Promise，Promise.race 取最先完成者
+const result = await Promise.race([
+  // 路徑 1: UI 對話框 — 推送到 React/Ink 渲染佇列
+  interactiveHandler.prompt(toolUse),
+
+  // 路徑 2: Hook 系統 — 執行外部腳本
+  hookHandler.evaluate(toolUse),
+
+  // 路徑 3: ML 分類器 — 判斷命令安全性
+  classifierHandler.classify(toolUse),
+])
+
+// 關鍵設計：如果分類器判斷「不安全」，它不返回 deny，
+// 而是返回永遠不 resolve 的 Promise，讓其他 handler 接手：
+async function awaitClassifierAutoApproval(command) {
+  const safety = await classifyBashCommand(command)
+  if (safety === 'safe') {
+    return { behavior: 'allow' }
+  }
+  return new Promise(() => {}) // 永遠不 resolve → race 繼續等待
+}
+```
+
+### InteractiveHandler — 使用者對話框
+
+推送到 UI 佇列，渲染權限對話框，等待使用者點擊「允許」或「拒絕」。
+
+### Hook Handler — 自訂腳本
+
+使用者可以定義 `permission_request` hooks，由外部腳本自動做出決定。
+
+### Bash Classifier — ML 自動審批
+
+這是最有趣的部分。對於 BashTool，Claude Code 使用一個 **ML 分類器** 來自動判斷命令是否安全：
+
+```typescript
+// src/tools/BashTool/bashPermissions.ts
+async function awaitClassifierAutoApproval(
+  command: string,
+  context: PermissionContext
+): Promise<PermissionDecision> {
+  // ML 模型分析命令安全性
+  const safety = await classifyBashCommand(command);
+
+  if (safety === 'safe') {
+    return { behavior: 'allow' };
+  }
+  // 不安全 → 不返回結果，讓其他 handler 接手
+  return new Promise(() => {}); // 永遠不 resolve
+}
+```
+
+<Callout type="tip">
+注意最後一行：如果分類器判斷命令不安全，它不返回「拒絕」，而是返回一個永遠不 resolve 的 Promise。這讓 `Promise.race` 繼續等待其他 handler（通常是使用者對話框）做出決定。分類器只加速安全的操作，不會阻擋不安全的操作。
+</Callout>
+
+## Permission Decision 型別
+
+```typescript
+type PermissionDecision =
+  | { behavior: 'allow'; updatedInput?: unknown }  // 允許（可修改輸入）
+  | { behavior: 'deny'; reason: string }            // 拒絕（附原因）
+  | { behavior: 'ask'; ... }                        // 需要人工判斷
+  | { behavior: 'hook_result'; ... };               // Hook 決定
+```
+
+## Denial Tracking — 拒絕升級機制
+
+如果使用者連續拒絕多次，系統會升級反應：
+
+```
+第 1 次拒絕: 正常處理，代理嘗試其他方案
+第 2 次拒絕: 記錄追蹤
+第 N 次拒絕: 提示使用者是否要調整權限規則
+```
+
+這避免了代理陷入「請求 → 拒絕 → 重試 → 拒絕」的無限迴圈。
+
+## Speculative Classification
+
+為了減少使用者等待時間，分類器在 LLM 回應串流時就開始工作：
+
+```typescript
+// 在 LLM 回應串流中，一旦看到 BashTool 呼叫
+function startSpeculativeClassifierCheck(command: string) {
+  // 在使用者看到權限對話框之前，分類器已經在背景分析
+  classifierPromise = classifyBashCommand(command);
+}
+```
+
+這意味著：如果命令是安全的，使用者可能根本看不到權限對話框 — 分類器已經在毫秒級內批准了。
+
+## 背景代理的權限
+
+背景運行的子代理不能彈出 UI 對話框。它們使用 `shouldAvoidPermissionPrompts: true`，只依賴規則引擎和分類器。如果無法自動決定，子代理會暫停等待。
+
+## 關鍵要點
+
+<Callout type="important">
+Claude Code 的權限系統展示了一個精妙的平衡：**安全性不一定要犧牲效率**。通過 ML 分類器自動批准安全操作、Hook 系統允許自訂策略、以及 Promise.race 並行競賽模式，系統在保持嚴格安全的同時，將大部分操作的延遲降到了近乎零。
+</Callout>
