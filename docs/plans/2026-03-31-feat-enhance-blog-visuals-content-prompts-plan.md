@@ -166,8 +166,8 @@ date: 2026-03-31
 - [x] 新增的程式碼區塊都有檔案路徑標註
 
 ### 部署
-- [ ] `next build` 成功
-- [ ] Vercel 部署成功且所有頁面可存取
+- [x] `next build` 成功
+- [x] Vercel 部署成功且所有頁面可存取
 
 ## References
 

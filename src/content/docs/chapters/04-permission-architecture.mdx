@@ -1,9 +1,8 @@
 ---
 title: "Permission Architecture — 分層權限"
-subtitle: "Permission Architecture — Layered Security"
 description: "四層權限模型、三條平行審批路徑、ML 自動分類器、以及拒絕升級機制的完整解析"
-order: 4
-tags: ["權限", "安全", "Classifier", "Handler"]
+sidebar:
+  order: 4
 ---
 
 ## 為什麼權限是最困難的問題？
@@ -132,9 +131,9 @@ async function awaitClassifierAutoApproval(
 }
 ```
 
-<Callout type="tip">
+:::tip[Tip]
 注意最後一行：如果分類器判斷命令不安全，它不返回「拒絕」，而是返回一個永遠不 resolve 的 Promise。這讓 `Promise.race` 繼續等待其他 handler（通常是使用者對話框）做出決定。分類器只加速安全的操作，不會阻擋不安全的操作。
-</Callout>
+:::
 
 ## Permission Decision 型別
 
@@ -178,6 +177,6 @@ function startSpeculativeClassifierCheck(command: string) {
 
 ## 關鍵要點
 
-<Callout type="important">
+:::tip[Key Insight]
 Claude Code 的權限系統展示了一個精妙的平衡：**安全性不一定要犧牲效率**。通過 ML 分類器自動批准安全操作、Hook 系統允許自訂策略、以及 Promise.race 並行競賽模式，系統在保持嚴格安全的同時，將大部分操作的延遲降到了近乎零。
-</Callout>
+:::

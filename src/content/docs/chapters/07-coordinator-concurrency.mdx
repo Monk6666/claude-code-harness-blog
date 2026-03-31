@@ -1,9 +1,8 @@
 ---
 title: "Coordinator & Concurrency — 協調與並行"
-subtitle: "Coordinator & Concurrency Control"
 description: "Query Loop 主迴圈設計、StreamingToolExecutor、並行批次分區策略、以及多代理 Swarm 編排"
-order: 7
-tags: ["Query Loop", "並行", "Streaming", "Swarm"]
+sidebar:
+  order: 7
 ---
 
 ## Query Loop — 系統的心臟
@@ -51,9 +50,9 @@ async function* query(
 }
 ```
 
-<Callout type="important">
+:::tip[Key Insight]
 注意這是一個 **async generator** (`function*`)。它不是一次性返回所有結果，而是通過 `yield` 逐步產出訊息和事件。這讓 UI 可以即時顯示進度，而不需要等待整個回合完成。
-</Callout>
+:::
 
 ## 為什麼用 Generator 而不是 Callback？
 
@@ -276,9 +275,9 @@ const WORKER_ALLOWED_TOOLS = [
 ];
 ```
 
-<Callout type="note">
+:::note[Note]
 Worker 的工具集是 Leader 的子集。Worker 不能安裝 plugin、修改設定或建立自己的 team。這是刻意的限制 — 防止 Worker 改變全域狀態。
-</Callout>
+:::
 
 ## Terminal Conditions
 
@@ -296,6 +295,6 @@ Query Loop 什麼時候停止？
 
 ## 關鍵要點
 
-<Callout type="important">
+:::tip[Key Insight]
 Claude Code 的並行控制展現了一個務實的策略：**不追求最大化並行，而是確保正確性**。唯讀工具可以自由並行，但任何有副作用的工具都會觸發排他執行。這種「保守但正確」的策略，配合 Sibling Abort 和 Context Modifier，讓系統在複雜場景下也能保持一致性。
-</Callout>
+:::

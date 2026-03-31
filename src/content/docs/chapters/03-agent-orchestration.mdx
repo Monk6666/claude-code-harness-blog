@@ -1,9 +1,8 @@
 ---
 title: "Agent Orchestration — 代理編排"
-subtitle: "Agent Orchestration — Recursive Agent Composition"
 description: "探索 AgentTool 的三種執行模式、CacheSafeParams prompt cache 共享機制、以及子代理隔離策略"
-order: 3
-tags: ["Agent", "Cache", "並行", "Worktree"]
+sidebar:
+  order: 3
 ---
 
 ## 為什麼需要子代理？
@@ -81,9 +80,9 @@ function getLastCacheSafeParams(): CacheSafeParams | null {
 }
 ```
 
-<Callout type="important">
+:::tip[Key Insight]
 這意味著父代理和所有子代理共享同一個 prompt cache。子代理的 system prompt、tools、model 必須與父代理完全一致，才能命中快取。這是刻意的架構約束 — 犧牲子代理的客製化彈性，換取巨大的成本節省。
-</Callout>
+:::
 
 ## 子代理建立流程
 
@@ -202,6 +201,6 @@ type TaskState = {
 
 ## 關鍵要點
 
-<Callout type="important">
+:::tip[Key Insight]
 Claude Code 的 Agent Orchestration 展現了一個關鍵洞見：**子代理不需要是獨立的實體，它們可以是父代理的「快取共享分身」**。透過 CacheSafeParams 確保 prompt cache 命中，多代理系統的成本可以控制在可接受的範圍內。這是讓 AI 代理「可部署」的關鍵工程決策。
-</Callout>
+:::

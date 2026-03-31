@@ -1,9 +1,8 @@
 ---
 title: "Hook System — 可擴展的生命週期"
-subtitle: "Hook System — Extensible Lifecycle Events"
 description: "Claude Code 的事件驅動 Hook 系統：子程序執行、Memoized 載入、以及自訂擴展機制"
-order: 5
-tags: ["Hook", "事件", "擴展", "Plugin"]
+sidebar:
+  order: 5
 ---
 
 ## 為什麼需要 Hook 系統？
@@ -182,9 +181,9 @@ setupFileChangedWatcher('.claude/hooks.json', () => {
 });
 ```
 
-<Callout type="tip">
+:::tip[Tip]
 這是一個常見的效能優化模式：**熱路徑快取 + 變更驅動失效**。每次工具執行都需要檢查 hooks，如果每次都重新讀取設定檔會太慢。但如果設定檔被修改了，快取會自動失效。
-</Callout>
+:::
 
 ## Hook 來源
 
@@ -241,6 +240,6 @@ Hook 可以來自多個來源，按優先順序合併：
 
 ## 關鍵要點
 
-<Callout type="important">
+:::tip[Key Insight]
 Hook System 體現了 Harness Engineering 的擴展性原則：**核心框架提供觸發點，使用者通過外部腳本注入自訂邏輯**。這種「子程序 + JSON 協議」的設計讓 hooks 可以用任何語言實現，完全解耦於核心系統。
-</Callout>
+:::

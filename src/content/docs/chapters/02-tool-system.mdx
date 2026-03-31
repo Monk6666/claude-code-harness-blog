@@ -1,9 +1,8 @@
 ---
 title: "Tool System — 工具即一等公民"
-subtitle: "Tool System — Tools as First-Class Citizens"
 description: "深入解析 Claude Code 的工具定義、驗證、執行生命週期，以及 buildTool 安全預設值模式"
-order: 2
-tags: ["Tool", "Zod", "TypeScript", "設計模式"]
+sidebar:
+  order: 2
 ---
 
 ## 為什麼工具是核心？
@@ -67,13 +66,13 @@ export type Tool<
 }
 ```
 
-<Callout type="tip">
+:::tip[Tip]
 注意 `isReadOnly` 和 `isConcurrencySafe` 的參數是 `input` 而非無參數。這意味著**同一個工具在不同輸入下可以有不同的並行策略**。例如 `BashTool` 執行 `ls` 是唯讀的，但執行 `rm` 不是。
-</Callout>
+:::
 
-<Callout type="important">
+:::tip[Key Insight]
 注意三個布林方法：`isReadOnly`、`isDestructive`、`isConcurrencySafe`。它們決定了工具在並行執行時的排程策略（Ch.7 詳述）。
-</Callout>
+:::
 
 ## buildTool — 安全預設值模式
 
@@ -101,9 +100,9 @@ export function buildTool<D extends AnyToolDef>(def: D): BuiltTool<D> {
 }
 ```
 
-<Callout type="tip">
+:::tip[Tip]
 這是一個經典的安全工程模式：**Fail-Closed Default**。如果你忘記聲明一個工具是可以並行的，它會被當作不可並行處理 — 寧可犧牲效能也不冒正確性的風險。
-</Callout>
+:::
 
 ## 工具生命週期
 
@@ -219,6 +218,6 @@ Claude Code 內建超過 30 個工具，涵蓋了軟體工程的各個面向：
 
 ## 關鍵要點
 
-<Callout type="important">
+:::tip[Key Insight]
 Claude Code 的 Tool System 展現了一個核心設計理念：**透過泛型介面標準化所有外部互動，用 fail-closed 預設值保證安全，用雙軌 schema 驗證保證正確性。** 這是 Harness Engineering 的基石 — 沒有受控的工具層，就無法建立可靠的 AI 代理。
-</Callout>
+:::

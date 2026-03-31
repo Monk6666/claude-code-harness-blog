@@ -1,9 +1,8 @@
 ---
 title: "Skills & Plugin System — 技能與插件"
-subtitle: "Skills & Plugin System — Extensibility at Scale"
 description: "Skill 定義與發現機制、MCP 協議整合、Plugin 生命週期管理、以及擴展生態系統"
-order: 8
-tags: ["Skills", "MCP", "Plugin", "擴展"]
+sidebar:
+  order: 8
 ---
 
 ## 為什麼需要技能與插件？
@@ -158,9 +157,9 @@ export const connectToServer = memoize(
 )
 ```
 
-<Callout type="tip">
+:::tip[Tip]
 `connectToServer` 使用了 memoization — 同一個 `(name, config)` 的連線只會建立一次。這避免了每次工具呼叫都重新連線的開銷。SSE transport 的 EventSource（長連線）使用獨立的無超時 fetch，確保長時間運行的串流不會被意外中斷。
-</Callout>
+:::
 
 ### MCP 工具呼叫的 URL Elicitation 重試
 
@@ -267,9 +266,9 @@ async function loadAllPlugins(options) {
 }
 ```
 
-<Callout type="tip">
+:::tip[Tip]
 使用 `Promise.allSettled` 而非 `Promise.all` 是錯誤隔離的關鍵。如果用 `Promise.all`，任何一個 plugin 載入失敗都會導致所有 plugin 都無法載入。`allSettled` 確保每個 plugin 獨立成敗。
-</Callout>
+:::
 
 ## 建立自訂 Skill 範例
 
@@ -306,6 +305,6 @@ and execute database migrations.
 
 ## 關鍵要點
 
-<Callout type="important">
+:::tip[Key Insight]
 Skills 和 Plugins 共同構成了 Claude Code 的擴展層。Skills 是「提示級擴展」— 用 markdown 定義專家行為。Plugins 和 MCP 是「工具級擴展」— 引入新的能力和資源。兩者結合，讓 Claude Code 從一個通用代理變成一個可高度客製化的工程平台。
-</Callout>
+:::
