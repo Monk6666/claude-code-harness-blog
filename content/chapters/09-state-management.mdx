@@ -153,7 +153,7 @@ type ToolUseContext = {
 
 ## Settings 變更傳播
 
-<Mermaid chart={`
+```mermaid
 graph TD
     User[使用者修改設定] --> SP[Settings Provider]
     SP --> AS[AppState.settings]
@@ -166,7 +166,7 @@ graph TD
     L3 --> Update3[啟用/禁用工具]
 
     style User fill:#6366f1,color:#fff
-`} />
+```
 
 ```typescript
 // 設定變更觸發重新計算

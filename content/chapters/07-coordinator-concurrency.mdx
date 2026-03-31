@@ -170,7 +170,7 @@ export async function* runToolUse(
 
 `src/services/tools/toolOrchestration.ts` 將工具呼叫分成可並行和不可並行的批次：
 
-<Mermaid chart={`
+```mermaid
 graph LR
     Input[工具呼叫序列] --> Partition{分區}
 
@@ -189,7 +189,7 @@ graph LR
     style B1 fill:#22c55e,color:#fff
     style B2 fill:#ef4444,color:#fff
     style B3 fill:#22c55e,color:#fff
-`} />
+```
 
 分區規則：
 

@@ -11,6 +11,7 @@ export function MermaidDiagram({ chart }: { chart: string }) {
   const { theme } = useTheme();
 
   useEffect(() => {
+    if (!chart) return;
     let cancelled = false;
 
     async function render() {
@@ -60,6 +61,10 @@ export function MermaidDiagram({ chart }: { chart: string }) {
       cancelled = true;
     };
   }, [chart, theme]);
+
+  if (!chart) {
+    return null;
+  }
 
   if (error) {
     return (

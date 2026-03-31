@@ -65,7 +65,7 @@ Hook 在 `.claude/hooks.json` 或設定中定義：
 
 ## 執行架構
 
-<Mermaid chart={`
+```mermaid
 sequenceDiagram
     participant H as Harness
     participant HE as Hook Engine
@@ -87,7 +87,7 @@ sequenceDiagram
         HE-->>H: Continue
         H->>T: Execute tool
     end
-`} />
+```
 
 ### executeHooks — 真實的 async generator
 

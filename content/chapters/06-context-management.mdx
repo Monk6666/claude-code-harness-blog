@@ -118,7 +118,7 @@ type CompactionStrategy =
 
 ### 壓縮流程
 
-<Mermaid chart={`
+```mermaid
 graph TD
     Start[上下文接近限制] --> Check{壓縮策略}
 
@@ -136,7 +136,7 @@ graph TD
 
     style Start fill:#ef4444,color:#fff
     style New fill:#22c55e,color:#fff
-`} />
+```
 
 壓縮的核心是：**用 LLM 自己來摘要化舊的對話**。系統會呼叫一次 Claude 來產生一個精簡的摘要，替代之前長串的對話歷史。
 

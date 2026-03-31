@@ -21,7 +21,7 @@ tags: ["prompt", "系統提示詞", "快取", "架構"]
 
 Claude Code 的系統提示詞遵循 5 層覆蓋優先順序。高優先權的層級可以**完全替換**低優先權的預設提示：
 
-<Mermaid chart={`
+```mermaid
 graph TD
     O["Layer 0: Override<br/>（loop mode 完全覆蓋）"] --> C
     C["Layer 1: Coordinator<br/>（協調器模式）"] --> A
@@ -38,7 +38,7 @@ graph TD
     style A fill:#eab308,color:#fff
     style CS fill:#22c55e,color:#fff
     style D fill:#6366f1,color:#fff
-`} />
+```
 
 核心實現在 `buildEffectiveSystemPrompt()` 函數中：
 
@@ -164,7 +164,7 @@ export async function resolveSystemPromptSections(
 
 Claude Code 的系統提示詞中有一個精心設計的**分界標記**，將內容分為「可全域快取」與「Session 專屬」兩個區域：
 
-<Mermaid chart={`
+```mermaid
 graph LR
     subgraph "scope: global（跨組織快取）"
         I["Identity<br/>身份與角色"]
@@ -199,7 +199,7 @@ graph LR
     style MM fill:#22c55e,color:#fff
     style EI fill:#22c55e,color:#fff
     style MC fill:#22c55e,color:#fff
-`} />
+```
 
 ### Boundary 的定義與作用
 

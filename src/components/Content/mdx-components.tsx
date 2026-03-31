@@ -1,9 +1,9 @@
-import { MermaidDiagram } from "./MermaidDiagram";
+import { MermaidWrapper } from "./MermaidWrapper";
 import { Callout } from "./Callout";
 import { CodeBlock } from "./CodeBlock";
 
 export const mdxComponents = {
-  Mermaid: MermaidDiagram,
+  Mermaid: MermaidWrapper,
   Callout,
   pre: CodeBlock,
   table: (props: React.ComponentProps<"table">) => (

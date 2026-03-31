@@ -39,7 +39,7 @@ tags: ["概念", "架構", "總覽"]
 
 Claude Code 的整體架構可以分為以下核心子系統：
 
-<Mermaid chart={`
+```mermaid
 graph TB
     User[使用者輸入] --> QL[Query Loop 主迴圈]
     QL --> TS[Tool System 工具系統]
@@ -70,7 +70,7 @@ graph TB
     style AO fill:#818cf8,color:#fff
     style PS fill:#a78bfa,color:#fff
     style HS fill:#a78bfa,color:#fff
-`} />
+```
 
 ## 為什麼需要 Harness？
 

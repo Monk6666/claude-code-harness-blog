@@ -109,7 +109,7 @@ export function buildTool<D extends AnyToolDef>(def: D): BuiltTool<D> {
 
 每次 LLM 呼叫工具時，會經歷以下流程：
 
-<Mermaid chart={`
+```mermaid
 sequenceDiagram
     participant LLM as Claude LLM
     participant H as Harness
@@ -146,7 +146,7 @@ sequenceDiagram
     H->>T: mapToolResultToToolResultBlockParam(output)
     T-->>H: ToolResultBlock
     H-->>LLM: tool_result
-`} />
+```
 
 ## Zod + JSON Schema 雙軌驗證
 

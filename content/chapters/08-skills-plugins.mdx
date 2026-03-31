@@ -87,7 +87,7 @@ MCP 是一個開放協議，讓外部服務向 AI 代理提供工具、資源和
 
 ### MCP Transport 類型
 
-<Mermaid chart={`
+```mermaid
 graph LR
     CC[Claude Code] --> T1[Stdio Transport]
     CC --> T2[SSE Transport]
@@ -100,7 +100,7 @@ graph LR
     T4 --> S4[同程序模組]
 
     style CC fill:#6366f1,color:#fff
-`} />
+```
 
 | Transport | 適用場景 | 特點 |
 |-----------|---------|------|
