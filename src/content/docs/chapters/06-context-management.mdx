@@ -19,28 +19,34 @@ LLM 的上下文窗口是有限的資源。Claude 的上下文窗口有 200K tok
 Claude Code 組裝兩種上下文：
 
 ```typescript
-// src/context.ts
+// src/context.ts — 真實實現（lodash-es memoize）
 
-// 1. 系統上下文 — 環境資訊
-const getSystemContext = memoize(async () => ({
-  gitStatus: await getGitStatus(),     // Git 狀態快照
-  cacheBreaker: getInjectedPrompt(),   // 快取失效觸發
-}));
+// Git 狀態：session 級別快取，只取一次
+export const getGitStatus = memoize(async (): Promise<string | null> => {
+  // git status --short 輸出
+})
 
-// 2. 使用者上下文 — 記憶與偏好
-const getUserContext = memoize(async () => ({
-  memorySummary: await loadClaudeMd(),  // CLAUDE.md 內容
-  fileIndex: await getProjectIndex(),   // 專案結構索引
-}));
+// 系統上下文：包含 gitStatus + injected prompt
+export const getSystemContext = memoize(async () => ({ /* ... */ }))
+
+// 使用者上下文：包含 CLAUDE.md 內容 + 其他記憶
+export const getUserContext = memoize(async () => ({ /* ... */ }))
+
+// 快取失效：setSystemPromptInjection() 同時清除兩個快取
+export function setSystemPromptInjection(value: string | null): void {
+  injectedPrompt = value
+  getUserContext.cache.clear?.()   // 強制下一輪重新載入 CLAUDE.md
+  getSystemContext.cache.clear?.() // 強制下一輪重新取得 git status
+}
 ```
 
 :::tip[Tip]
-兩個上下文都使用了 `memoize()` — 在同一個 session 中，相同的上下文只會被組裝一次。這對效能至關重要，因為上下文組裝涉及大量的檔案系統操作。
+兩個上下文都用 `lodash-es/memoize`，在同一個 session 中只組裝一次。唯一的快取失效點是 `setSystemPromptInjection()`，當 `/inject-prompt` 或 system prompt 動態注入時觸發——此時兩個快取**都**清除，確保新的注入內容在下一輪 API call 中生效。
 :::
 
 ## CLAUDE.md 記憶系統
 
-CLAUDE.md 是 Claude Code 最獨特的功能之一。它是一個 markdown 檔案，充當代理的「持久記憶」：
+CLAUDE.md 是 Claude Code 的持久記憶機制。它是一個 markdown 檔案，在每次 session 啟動時載入進 system prompt：
 
 ```markdown
 # CLAUDE.md
@@ -101,47 +107,61 @@ type State = {
 `originalCwd` 永遠不會改變，它代表這個 session 的身份。而 `cwd` 可能因為 `EnterWorktreeTool` 而改變（進入子代理的隔離工作區）。這個區分很重要 — 歷史記錄和設定檔查找都基於 `projectRoot`，而不是當前的 `cwd`。
 :::
 
-## 上下文壓縮（Compaction）
+## 上下文壓縮策略與狀態機
 
-當上下文接近窗口限制時，Claude Code 啟動壓縮：
-
-### 壓縮策略
-
-```typescript
-// src/services/compact/
-type CompactionStrategy =
-  | 'auto'      // 接近上限時自動觸發
-  | 'reactive'  // 收到 "prompt too long" 錯誤後觸發
-  | 'snip';     // 精確裁剪特定訊息
-```
-
-### 壓縮流程
+Context 過長是 agentic session 的必然結果，不是邊界情況。Claude Code 設計了四種相互協作的壓縮機制，按代價從低到高排列：
 
 ```mermaid
-graph TD
-    Start[上下文接近限制] --> Check{壓縮策略}
+stateDiagram-v2
+    [*] --> Monitor : 每輪迭代開始
 
-    Check -->|auto| Auto[自動壓縮]
-    Check -->|reactive| React[反應式壓縮]
-    Check -->|snip| Snip[精確裁剪]
+    Monitor --> Snip : HISTORY_SNIP feature on\napplyToolResultBudget() 觸達
+    Monitor --> Microcompact : cachedMicrocompact 可用
+    Monitor --> Autocompact : tokens ≥ contextWindow − 13k\n(AUTOCOMPACT_BUFFER_TOKENS)
+    Monitor --> Idle : 未達任何閾值
 
-    Auto --> Sum[摘要化舊對話]
-    React --> Sum
-    Snip --> Cut[移除特定大型回應]
+    Snip --> Microcompact : snip 完成，繼續檢查
+    Microcompact --> Autocompact : microcompact 完成，繼續檢查
+    Autocompact --> ApiCall : 壓縮成功，用新訊息執行 API
+    Autocompact --> ConsecutiveFailure : 壓縮失敗
+    ConsecutiveFailure --> CircuitBreaker : 連續失敗 3 次\n(MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES)
+    CircuitBreaker --> Idle : 停止重試，等待手動 /compact
 
-    Sum --> Merge[保留 system prompt + 最近對話]
-    Cut --> Merge
-    Merge --> New[壓縮後的上下文]
+    Idle --> ApiCall : 未壓縮直接執行
 
-    style Start fill:#ef4444,color:#fff
-    style New fill:#22c55e,color:#fff
+    ApiCall --> ReactiveCompact : API 回傳 413\n或 media size error
+    ApiCall --> [*] : 成功
+
+    state "Reactive Compact" as ReactiveCompact {
+        [*] --> ContextCollapseDrain : feature CONTEXT_COLLAPSE
+        ContextCollapseDrain --> ReactiveCompactRetry : drain 有項目
+        ReactiveCompactRetry --> [*] : 成功
+        ContextCollapseDrain --> LLMSummary : drain 空
+        LLMSummary --> [*] : 壓縮後重試
+        LLMSummary --> [*] : 失敗 → prompt_too_long terminal
+    }
+
+    ReactiveCompact --> [*]
 ```
 
-壓縮的核心是：**用 LLM 自己來摘要化舊的對話**。系統會呼叫一次 Claude 來產生一個精簡的摘要，替代之前長串的對話歷史。
+### 為什麼需要四層機制？
+
+每一層解決不同的問題：
+
+| 機制 | 觸發時機 | 方法 | 代價 |
+|---|---|---|---|
+| **Snip** | tool result 超過 budget | 截斷最大的 tool result | 零 API 呼叫，但有資訊損失 |
+| **Microcompact** | 快取式壓縮可用 | 複用舊摘要，剪接訊息 | 極低（cache hit） |
+| **Autocompact** | tokens ≥ threshold | 呼叫 LLM 產生摘要（保留 20k output tokens） | 1 次 API 呼叫，~50k input tokens |
+| **Reactive Compact** | API 413 error | 收到錯誤後才壓縮，保留最大上下文 | 同 autocompact，但時機不同 |
+
+:::tip[Key Insight]
+Proactive autocompact 和 reactive compact 是**互斥的**。`isAutoCompactEnabled()` 的邏輯確保：如果啟用了 contextCollapse 或 reactive compact，就不會在 API 呼叫前主動壓縮——因為主動壓縮會丟棄 collapse 正要保存的細粒度歷史。這是「悲觀壓縮」vs「樂觀壓縮」的策略選擇，兩者不能同時存在。
+:::
 
 ### 壓縮 Hooks
 
-壓縮前後都有 hook 觸發點：
+壓縮前後都有 hook 觸發點（由 `postCompactCleanup.ts` 和 hook system 觸發）：
 
 ```json
 {
@@ -153,6 +173,8 @@ graph TD
   }]
 }
 ```
+
+壓縮完成後，`postCompactCleanup.ts` 還會嘗試恢復最多 5 個最近編輯的檔案（`POST_COMPACT_MAX_FILES_TO_RESTORE = 5`），避免壓縮後遺忘剛才修改過的內容。
 
 ## Memoization 策略
 
