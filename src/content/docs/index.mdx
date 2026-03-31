@@ -15,7 +15,7 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
 
 ## 架構總覽
 
@@ -40,37 +40,15 @@ Claude Code 的 Harness Engineering 架構由以下核心子系統組成：
 ## 章節導覽
 
 <CardGrid>
-  <Card title="Ch.1 Harness Engineering 概論" icon="open-book">
-    從 ChatBot 到 Agent 的演進 — 為什麼我們需要「駕馭工程」
-  </Card>
-  <Card title="Ch.2 工具系統" icon="setting">
-    工具即一等公民 — 型別定義、驗證、執行生命週期
-  </Card>
-  <Card title="Ch.3 代理編排" icon="puzzle">
-    多代理協作 — Leader/Worker 模式與 Cache 共享
-  </Card>
-  <Card title="Ch.4 權限架構" icon="approve-check-circle">
-    分層權限系統 — ML 分類器與 Promise.race 並行
-  </Card>
-  <Card title="Ch.5 Hook 系統" icon="random">
-    生命週期擴展 — 子程序 + JSON 協議
-  </Card>
-  <Card title="Ch.6 上下文管理" icon="document">
-    CLAUDE.md 多層合併與上下文壓縮策略
-  </Card>
-  <Card title="Ch.7 並行控制" icon="list-format">
-    Coordinator 與 StreamingToolExecutor 的排程策略
-  </Card>
-  <Card title="Ch.8 Skills 與 Plugins" icon="add-document">
-    MCP 協議整合與技能系統設計
-  </Card>
-  <Card title="Ch.9 狀態管理" icon="information">
-    會話狀態、持久化與恢復機制
-  </Card>
-  <Card title="Ch.10 設計模式總結" icon="star">
-    10 大核心設計模式的橫切分析
-  </Card>
-  <Card title="Ch.11 Prompt Engineering" icon="pencil">
-    系統提示詞的分層架構與 Cache Boundary 設計
-  </Card>
+  <LinkCard title="Ch.1 Harness Engineering 概論" href="/chapters/01-introduction/" description="從 ChatBot 到 Agent 的演進 — 為什麼我們需要「駕馭工程」" />
+  <LinkCard title="Ch.2 工具系統" href="/chapters/02-tool-system/" description="工具即一等公民 — 型別定義、驗證、執行生命週期" />
+  <LinkCard title="Ch.3 代理編排" href="/chapters/03-agent-orchestration/" description="多代理協作 — Leader/Worker 模式與 Cache 共享" />
+  <LinkCard title="Ch.4 權限架構" href="/chapters/04-permission-architecture/" description="分層權限系統 — ML 分類器與 Promise.race 並行" />
+  <LinkCard title="Ch.5 Hook 系統" href="/chapters/05-hook-system/" description="生命週期擴展 — 子程序 + JSON 協議" />
+  <LinkCard title="Ch.6 上下文管理" href="/chapters/06-context-management/" description="CLAUDE.md 多層合併與上下文壓縮策略" />
+  <LinkCard title="Ch.7 並行控制" href="/chapters/07-coordinator-concurrency/" description="Coordinator 與 StreamingToolExecutor 的排程策略" />
+  <LinkCard title="Ch.8 Skills 與 Plugins" href="/chapters/08-skills-plugins/" description="MCP 協議整合與技能系統設計" />
+  <LinkCard title="Ch.9 狀態管理" href="/chapters/09-state-management/" description="會話狀態、持久化與恢復機制" />
+  <LinkCard title="Ch.10 設計模式總結" href="/chapters/10-design-patterns-summary/" description="10 大核心設計模式的橫切分析" />
+  <LinkCard title="Ch.11 Prompt Engineering" href="/chapters/11-prompt-engineering/" description="系統提示詞的分層架構與 Cache Boundary 設計" />
 </CardGrid>
