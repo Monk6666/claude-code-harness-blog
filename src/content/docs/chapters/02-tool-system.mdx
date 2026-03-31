@@ -74,6 +74,81 @@ export type Tool<
 注意三個布林方法：`isReadOnly`、`isDestructive`、`isConcurrencySafe`。它們決定了工具在並行執行時的排程策略（Ch.7 詳述）。
 :::
 
+## Tool 執行狀態機
+
+一個工具呼叫從 LLM 產生 `tool_use` block，到結果送回 LLM，要經過兩層狀態機：
+
+### 第一層：TrackedTool 狀態機（StreamingToolExecutor）
+
+`StreamingToolExecutor` 為每個工具維護一個 `ToolStatus`，控制並行排程：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued : addTool() — 串流中即時加入
+
+    state "Queued" as Queued
+    state "Executing" as Executing
+    state "Completed" as Completed
+    state "Yielded" as Yielded
+
+    Queued --> Executing : canExecuteTool() pass\n[無 exclusive 工具執行中]\n或[全部都是 concurrency-safe]
+    Queued --> Completed : abortController 已觸發\n→ 產生 synthetic cancel result
+
+    Executing --> Completed : tool.call() 解析
+    Executing --> Completed : sibling Bash 失敗\nsiblingAbortController.abort('sibling_error')
+
+    Completed --> Yielded : getRemainingResults() 取走結果
+
+    Yielded --> [*]
+```
+
+:::tip[Key Insight]
+`completed` 和 `yielded` 是**兩個不同的狀態**，這是為了處理「非 concurrency-safe 工具的結果需要按序交付」的問題。如果一個 exclusive 工具正在執行，後面的工具結果必須等待，即使它已經 `completed`，也要等到前面的工具 `yielded` 後才能交付——這防止了工具結果亂序到達 LLM。
+:::
+
+### 第二層：runToolUse 執行序列
+
+每個工具在 `src/services/tools/toolExecution.ts` 的 `runToolUse()` 中執行：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Lookup : 工具名稱查找
+
+    Lookup --> AliasCheck : 主名稱未找到
+    AliasCheck --> NotFound : 非 alias
+    NotFound --> [*] : yield tool_use_error
+
+    Lookup --> AbortCheck : 工具找到
+    AliasCheck --> AbortCheck : 找到 deprecated alias
+
+    AbortCheck --> [*] : 已中止 → yield CANCEL_MESSAGE
+    AbortCheck --> PermissionCheck : 未中止
+
+    state "Permission Check" as PermissionCheck {
+        [*] --> Race
+        Race --> Interactive : UI 對話框
+        Race --> Hook : permission hook
+        Race --> Classifier : ML 分類器（BashTool）
+        Interactive --> [*] : 用戶決定
+        Hook --> [*] : hook 決定
+        Classifier --> [*] : safe → allow\nunsafe → 永不 resolve
+    }
+
+    PermissionCheck --> Denied : behavior = 'deny'
+    Denied --> [*] : yield REJECT_MESSAGE
+
+    PermissionCheck --> Executing : behavior = 'allow'
+
+    state "Executing" as Executing {
+        [*] --> Progress
+        Progress --> Progress : onProgress() callback\n→ yield 進度訊息
+        Progress --> [*] : tool.call() 完成
+    }
+
+    Executing --> [*] : yield ToolResult
+    Executing --> [*] : catch error → yield tool_use_error
+```
+
 ## buildTool — 安全預設值模式
 
 Claude Code 使用 **Fail-Closed** 預設值：如果工具開發者忘記設定某個屬性，系統會採用最保守的行為。
