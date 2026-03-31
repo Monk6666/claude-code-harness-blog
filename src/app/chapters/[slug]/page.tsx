@@ -3,6 +3,7 @@ import { getAllChapterSlugs, getChapterBySlug, getAdjacentChapters } from "@/lib
 import { renderMDX } from "@/lib/mdx";
 import { ChapterNav } from "@/components/Content/ChapterNav";
 import { TableOfContents } from "@/components/Content/TableOfContents";
+import { CodeBlockEnhancer } from "@/components/Content/CodeBlock";
 import type { Metadata } from "next";
 
 export async function generateStaticParams() {
@@ -82,7 +83,10 @@ export default async function ChapterPage({
         </div>
 
         {/* MDX content */}
-        <div className="mdx-content">{content}</div>
+        <div className="mdx-content">
+          {content}
+          <CodeBlockEnhancer />
+        </div>
 
         {/* Chapter navigation */}
         <ChapterNav prev={prev} next={next} />
