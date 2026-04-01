@@ -1,0 +1,66 @@
+---
+import config from 'virtual:starlight/user-config';
+import { Icon } from '@astrojs/starlight/components';
+
+const links = config.social || [];
+const githubRepo = 'MIBlue119/claude-code-harness-blog';
+---
+
+{
+  links.length > 0 && (
+    <>
+      {links.map(({ label, href, icon }) =>
+        icon === 'github' ? (
+          <a href={href} rel="me" class="sl-flex github-link">
+            <span class="sr-only">{label}</span>
+            <Icon name="github" />
+            <span class="gh-stars" id="gh-star-count">★</span>
+          </a>
+        ) : (
+          <a href={href} rel="me" class="sl-flex">
+            <span class="sr-only">{label}</span>
+            <Icon name={icon} />
+          </a>
+        )
+      )}
+    </>
+  )
+}
+
+<script define:vars={{ githubRepo }}>
+  async function loadStars() {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${githubRepo}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const count = data.stargazers_count;
+      const el = document.getElementById('gh-star-count');
+      if (el && count !== undefined) {
+        el.textContent = count >= 1000
+          ? `★ ${(count / 1000).toFixed(1)}k`
+          : `★ ${count}`;
+      }
+    } catch (_) {}
+  }
+  loadStars();
+</script>
+
+<style>
+  a {
+    color: var(--sl-color-text-accent);
+    padding: 0.5em;
+    margin: -0.5em;
+  }
+  a:hover {
+    opacity: 0.66;
+  }
+  .github-link {
+    align-items: center;
+    gap: 0.3em;
+  }
+  .gh-stars {
+    font-size: 0.78em;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+</style>

@@ -18,6 +18,16 @@ export default defineConfig({
           lang: 'zh-TW',
         },
       },
+      social: [
+        {
+          icon: 'github',
+          label: 'GitHub',
+          href: 'https://github.com/MIBlue119/claude-code-harness-blog',
+        },
+      ],
+      components: {
+        SocialIcons: './src/components/SocialIcons.astro',
+      },
       sidebar: [
         {
           label: '章節',
