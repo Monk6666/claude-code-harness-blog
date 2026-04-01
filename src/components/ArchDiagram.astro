@@ -1,0 +1,146 @@
+---
+---
+
+<div class="arch-diagram">
+  <!-- Top: Query Loop -->
+  <div class="arch-row arch-top">
+    <div class="arch-cell arch-header">
+      <span class="arch-en">Query Loop</span>
+      <span class="arch-zh">主迴圈 / 串流工具執行</span>
+    </div>
+  </div>
+
+  <!-- Middle: 5 subsystems -->
+  <div class="arch-row arch-middle">
+    <div class="arch-cell">
+      <span class="arch-en">Tool System</span>
+      <span class="arch-zh">工具定義・驗證執行</span>
+    </div>
+    <div class="arch-cell">
+      <span class="arch-en">Agent Orchestration</span>
+      <span class="arch-zh">代理編排・Cache 共享</span>
+    </div>
+    <div class="arch-cell">
+      <span class="arch-en">Permission System</span>
+      <span class="arch-zh">分層權限・ML 分類器</span>
+    </div>
+    <div class="arch-cell">
+      <span class="arch-en">Hook System</span>
+      <span class="arch-zh">生命週期・擴展點</span>
+    </div>
+    <div class="arch-cell">
+      <span class="arch-en">Context Mgmt</span>
+      <span class="arch-zh">上下文・快取壓縮</span>
+    </div>
+  </div>
+
+  <!-- Bottom: 4 subsystems -->
+  <div class="arch-row arch-bottom">
+    <div class="arch-cell">
+      <span class="arch-en">Skills</span>
+      <span class="arch-zh">技能</span>
+    </div>
+    <div class="arch-cell">
+      <span class="arch-en">Plugins / MCP</span>
+      <span class="arch-zh">插件・協議</span>
+    </div>
+    <div class="arch-cell">
+      <span class="arch-en">State Mgmt</span>
+      <span class="arch-zh">狀態管理</span>
+    </div>
+    <div class="arch-cell">
+      <span class="arch-en">Task System</span>
+      <span class="arch-zh">任務系統</span>
+    </div>
+  </div>
+</div>
+
+<style>
+  .arch-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1.5px solid var(--sl-color-gray-4);
+    border-radius: 10px;
+    overflow: hidden;
+    font-family: var(--sl-font-system);
+    margin: 1.5rem 0;
+  }
+
+  .arch-row {
+    display: flex;
+    border-bottom: 1.5px solid var(--sl-color-gray-4);
+  }
+  .arch-row:last-child {
+    border-bottom: none;
+  }
+
+  .arch-top .arch-cell {
+    background: var(--sl-color-accent-low);
+    justify-content: center;
+  }
+
+  .arch-middle .arch-cell {
+    flex: 1;
+    border-right: 1px solid var(--sl-color-gray-4);
+  }
+  .arch-middle .arch-cell:last-child {
+    border-right: none;
+  }
+
+  .arch-bottom .arch-cell {
+    flex: 1;
+    background: var(--sl-color-gray-6, #f6f7f8);
+    border-right: 1px solid var(--sl-color-gray-4);
+  }
+  .arch-bottom .arch-cell:last-child {
+    border-right: none;
+  }
+
+  .arch-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 14px 10px;
+    text-align: center;
+    min-width: 0;
+  }
+
+  .arch-en {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--sl-color-text);
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+
+  .arch-zh {
+    font-size: 0.72rem;
+    color: var(--sl-color-gray-2);
+    white-space: nowrap;
+  }
+
+  .arch-header .arch-en {
+    font-size: 0.95rem;
+    font-weight: 800;
+    color: var(--sl-color-accent);
+  }
+  .arch-header .arch-zh {
+    font-size: 0.78rem;
+    color: var(--sl-color-accent);
+    opacity: 0.8;
+  }
+
+  /* Dark mode: bottom row bg */
+  :root[data-theme='dark'] .arch-bottom .arch-cell {
+    background: var(--sl-color-gray-6, #1e2025);
+  }
+
+  @media (max-width: 600px) {
+    .arch-en { font-size: 0.72rem; }
+    .arch-zh { font-size: 0.62rem; }
+    .arch-cell { padding: 10px 6px; }
+  }
+</style>
