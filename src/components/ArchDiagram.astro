@@ -1,103 +1,117 @@
 ---
 ---
 
-<div class="arch-diagram">
+<div class="arch-wrapper">
+
   <!-- Top: Query Loop -->
-  <div class="arch-row arch-top">
-    <div class="arch-cell arch-header">
-      <span class="arch-en">Query Loop</span>
-      <span class="arch-zh">主迴圈 / 串流工具執行</span>
-    </div>
+  <div class="arch-top">
+    <span class="en">Query Loop</span>
+    <span class="zh">主迴圈 / 串流工具執行</span>
   </div>
 
   <!-- Middle: 5 subsystems -->
-  <div class="arch-row arch-middle">
-    <div class="arch-cell">
-      <span class="arch-en">Tool System</span>
-      <span class="arch-zh">工具定義・驗證執行</span>
+  <div class="arch-mid">
+    <div class="cell">
+      <span class="en">Tool System</span>
+      <span class="zh">工具定義・驗證執行</span>
     </div>
-    <div class="arch-cell">
-      <span class="arch-en">Agent Orchestration</span>
-      <span class="arch-zh">代理編排・Cache 共享</span>
+    <div class="cell">
+      <span class="en">Agent Orchestration</span>
+      <span class="zh">代理編排・Cache 共享</span>
     </div>
-    <div class="arch-cell">
-      <span class="arch-en">Permission System</span>
-      <span class="arch-zh">分層權限・ML 分類器</span>
+    <div class="cell">
+      <span class="en">Permission System</span>
+      <span class="zh">分層權限・ML 分類器</span>
     </div>
-    <div class="arch-cell">
-      <span class="arch-en">Hook System</span>
-      <span class="arch-zh">生命週期・擴展點</span>
+    <div class="cell">
+      <span class="en">Hook System</span>
+      <span class="zh">生命週期・擴展點</span>
     </div>
-    <div class="arch-cell">
-      <span class="arch-en">Context Mgmt</span>
-      <span class="arch-zh">上下文・快取壓縮</span>
+    <div class="cell cell-last-mid">
+      <span class="en">Context Mgmt</span>
+      <span class="zh">上下文・快取壓縮</span>
     </div>
   </div>
 
   <!-- Bottom: 4 subsystems -->
-  <div class="arch-row arch-bottom">
-    <div class="arch-cell">
-      <span class="arch-en">Skills</span>
-      <span class="arch-zh">技能</span>
+  <div class="arch-bot">
+    <div class="cell cell-dim">
+      <span class="en">Skills</span>
+      <span class="zh">技能</span>
     </div>
-    <div class="arch-cell">
-      <span class="arch-en">Plugins / MCP</span>
-      <span class="arch-zh">插件・協議</span>
+    <div class="cell cell-dim">
+      <span class="en">Plugins / MCP</span>
+      <span class="zh">插件・協議</span>
     </div>
-    <div class="arch-cell">
-      <span class="arch-en">State Mgmt</span>
-      <span class="arch-zh">狀態管理</span>
+    <div class="cell cell-dim">
+      <span class="en">State Mgmt</span>
+      <span class="zh">狀態管理</span>
     </div>
-    <div class="arch-cell">
-      <span class="arch-en">Task System</span>
-      <span class="arch-zh">任務系統</span>
+    <div class="cell cell-dim">
+      <span class="en">Task System</span>
+      <span class="zh">任務系統</span>
     </div>
   </div>
+
 </div>
 
 <style>
-  .arch-diagram {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
+  /* ── Outer shell ─────────────────────────────── */
+  .arch-wrapper {
     border: 1.5px solid var(--sl-color-gray-4);
     border-radius: 10px;
     overflow: hidden;
-    font-family: var(--sl-font-system);
     margin: 1.5rem 0;
+    font-family: var(--sl-font-system);
   }
 
-  .arch-row {
+  /* ── Top banner ──────────────────────────────── */
+  .arch-top {
     display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 14px 16px;
+    text-align: center;
+    background: var(--sl-color-accent-low);
     border-bottom: 1.5px solid var(--sl-color-gray-4);
   }
-  .arch-row:last-child {
+  .arch-top .en {
+    font-size: 1rem;
+    font-weight: 800;
+    color: var(--sl-color-accent);
+  }
+  .arch-top .zh {
+    font-size: 0.8rem;
+    color: var(--sl-color-accent);
+    opacity: 0.85;
+  }
+
+  /* ── Grid sections ───────────────────────────── */
+  /*
+   * Gap trick: set gap=1px + background=border-color on the grid,
+   * and background=page-bg on each cell.
+   * This renders 1px dividers in every direction automatically —
+   * no border-right / nth-child hacks, works when rows wrap.
+   */
+  .arch-mid,
+  .arch-bot {
+    display: grid;
+    gap: 1px;
+    background: var(--sl-color-gray-4); /* gap colour = divider */
+    border-bottom: 1.5px solid var(--sl-color-gray-4);
+  }
+  .arch-bot {
     border-bottom: none;
   }
 
-  .arch-top .arch-cell {
-    background: var(--sl-color-accent-low);
-    justify-content: center;
-  }
+  /* Desktop: 5 / 4 columns */
+  .arch-mid { grid-template-columns: repeat(5, 1fr); }
+  .arch-bot { grid-template-columns: repeat(4, 1fr); }
 
-  .arch-middle .arch-cell {
-    flex: 1;
-    border-right: 1px solid var(--sl-color-gray-4);
-  }
-  .arch-middle .arch-cell:last-child {
-    border-right: none;
-  }
-
-  .arch-bottom .arch-cell {
-    flex: 1;
-    background: var(--sl-color-gray-6, #f6f7f8);
-    border-right: 1px solid var(--sl-color-gray-4);
-  }
-  .arch-bottom .arch-cell:last-child {
-    border-right: none;
-  }
-
-  .arch-cell {
+  /* ── Cells ───────────────────────────────────── */
+  .cell {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -105,42 +119,46 @@
     gap: 4px;
     padding: 14px 10px;
     text-align: center;
-    min-width: 0;
+    background: var(--sl-color-bg);
+  }
+  .cell-dim {
+    background: var(--sl-color-gray-7, #f4f4f5);
   }
 
-  .arch-en {
+  .en {
     font-size: 0.82rem;
     font-weight: 700;
     color: var(--sl-color-text);
-    letter-spacing: 0.01em;
-    white-space: nowrap;
+    word-break: break-word;
   }
-
-  .arch-zh {
+  .zh {
     font-size: 0.72rem;
     color: var(--sl-color-gray-2);
-    white-space: nowrap;
+    word-break: break-word;
   }
 
-  .arch-header .arch-en {
-    font-size: 0.95rem;
-    font-weight: 800;
-    color: var(--sl-color-accent);
-  }
-  .arch-header .arch-zh {
-    font-size: 0.78rem;
-    color: var(--sl-color-accent);
-    opacity: 0.8;
+  /* ── Tablet: 2-col wrap ──────────────────────── */
+  @media (max-width: 720px) {
+    .arch-mid { grid-template-columns: repeat(2, 1fr); }
+    .arch-bot { grid-template-columns: repeat(2, 1fr); }
+
+    /* 5th cell spans both columns so the row is balanced */
+    .arch-mid .cell-last-mid {
+      grid-column: 1 / -1;
+    }
   }
 
-  /* Dark mode: bottom row bg */
-  :root[data-theme='dark'] .arch-bottom .arch-cell {
+  /* ── Mobile: tighten padding & font ─────────── */
+  @media (max-width: 480px) {
+    .en { font-size: 0.75rem; }
+    .zh { font-size: 0.65rem; }
+    .cell { padding: 10px 8px; }
+    .arch-top .en { font-size: 0.9rem; }
+    .arch-top .zh { font-size: 0.75rem; }
+  }
+
+  /* ── Dark mode ───────────────────────────────── */
+  :root[data-theme='dark'] .cell-dim {
     background: var(--sl-color-gray-6, #1e2025);
-  }
-
-  @media (max-width: 600px) {
-    .arch-en { font-size: 0.72rem; }
-    .arch-zh { font-size: 0.62rem; }
-    .arch-cell { padding: 10px 6px; }
   }
 </style>
