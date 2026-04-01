@@ -1,0 +1,757 @@
+---
+title: "Ch.14 — Prompt 全景圖"
+description: "Prompt 全景圖 — Claude Code 所有 Prompt 的完整解析：Tool Prompts、Service Prompts 與設計哲學"
+sidebar:
+  order: 14
+---
+
+:::note[前置知識橋]
+Ch.11 解析了 prompt 組裝架構與快取分層；Ch.13 逐節拆解了 system prompt 的 17 個 section。本章是完整的「prompt 字典」——不再是架構分析，而是把 Claude Code 原始碼中每個重要 prompt 的**實際文字**攤開來，讓讀者看清 Anthropic 工程師如何下指令。
+:::
+
+---
+
+## 為什麼 Tool Prompt 是被忽視的半壁江山？
+
+大多數關於 Claude Code 的技術分析都聚焦在 system prompt 上。但如果仔細計算 Claude Code 在每次 API 呼叫時實際傳送的 token 數量，你會發現另一個真相：**工具描述（tool descriptions）通常佔總 prompt token 的 30–50%**。
+
+每次呼叫 Claude API 時，`tools` 陣列包含了所有可用工具的 `description` 欄位。這些描述不是短短幾行說明工具用途的文字——它們是完整的行為規範，包含何時使用、何時不使用、危險操作的清單、以及具體的操作協議。BashTool 的完整 description 超過 2,000 字；AgentTool 的說明超過 1,500 字。
+
+更重要的是，tool description 的設計邏輯和 system prompt 有根本差異：
+
+- **System prompt** 塑造 Claude 的**身份**和**行為原則**
+- **Tool description** 塑造 Claude **如何使用一個具體的工具**——在什麼情境呼叫、如何準備參數、呼叫後的期望
+
+這兩個層級合力決定了 Claude Code 的實際行為。本章把兩個層級都攤開來。
+
+---
+
+## 14.1 Prompt 地圖：Claude Code 的完整 Prompt 版圖
+
+Claude Code 的 prompt 生態系可以分為三個大類：
+
+```
+System Prompt（Ch.13 已解析）
+  └── buildEffectiveSystemPrompt()
+      ├── Static sections [Sections 1–7]（全域快取）
+      │   ├── Intro — 身份宣告 + 安全指令
+      │   ├── System — 工具使用規範
+      │   ├── Doing Tasks — 任務執行原則
+      │   ├── Actions — 審慎執行協議
+      │   ├── Using Your Tools — 工具優先順序
+      │   ├── Tone and Style — 格式規範
+      │   └── Output Efficiency — 輸出簡潔性
+      └── Dynamic sections [Sections 8–17]（memoized / uncached）
+
+Tool Descriptions（本章重點）
+  ├── BashTool/prompt.ts         — 最複雜，含 Git Safety Protocol
+  ├── AgentTool/prompt.ts        — 子代理派遣的 meta-prompt
+  ├── TodoWriteTool/prompt.ts    — 任務管理哲學
+  ├── FileEditTool/prompt.ts     — 精確編輯的約束設計
+  ├── FileReadTool/prompt.ts     — 讀取工具的使用邊界
+  └── GrepTool/prompt.ts         — 搜尋優先策略
+
+Service Prompts（本章重點）
+  ├── compact/prompt.ts                    — Context 壓縮指令
+  ├── memdir/teamMemPrompts.ts             — Memory Section 注入
+  ├── extractMemories/prompts.ts           — 背景記憶抽取
+  ├── autoDream/consolidationPrompt.ts     — 夜間記憶整合
+  └── coordinator/coordinatorMode.ts      — 多 Agent 協調指揮官
+```
+
+三個大類在 Claude 的訊息流中以不同方式出現：
+
+| Prompt 類型 | 在 API 中的位置 | 更新頻率 | 快取策略 |
+|---|---|---|---|
+| System Prompt | `system` 欄位 | 每個 turn（靜態部分命中快取）| global cache / memoized |
+| Tool Descriptions | `tools[].description` | 每次 API 呼叫（tool list 不變則命中快取）| 視工具清單是否變化 |
+| Service Prompts | `messages` 陣列（user role）| 按需觸發 | 不快取（每次重新生成）|
+
+---
+
+## 14.2 BashTool Prompt 全文解析
+
+**原始碼位置：** `src/tools/BashTool/prompt.ts`，核心函數 `getSimplePrompt()`
+
+BashTool 的 description 是整個 Claude Code 中**最長、最複雜的 tool prompt**，超過 2,000 字。它之所以這麼長，是因為 Bash 是雙刃劍：它是最強大的工具，也是最危險的工具。
+
+### 架構：三個層次的約束
+
+BashTool prompt 可以分解為三個架構層次：
+
+```
+Layer 1: 工具使用前提（Tool Avoidance）
+  → 什麼情況下「不應該」用 BashTool
+
+Layer 2: 操作安全守則（Operational Safety）
+  → 路徑、工作目錄、超時、並行策略
+
+Layer 3: Git Safety Protocol（版本控制安全協議）
+  → 提交、PR、破壞性操作的完整工作流程
+```
+
+### Layer 1：工具迴避原則（Tool Avoidance）
+
+**什麼會壞？** 如果不加限制，Claude 會用 Bash 執行幾乎所有操作——`cat file.txt`、`grep pattern .`、`find . -name "*.ts"`。這些操作可以完成任務，但繞過了 Read、Grep、Glob 等專用工具。問題在於：Bash 輸出對使用者是黑盒，而專用工具的呼叫在 UI 中有明確的視覺呈現，讓使用者可以審查和授權。
+
+`getSimplePrompt()` 的開頭是一個**明確的禁止清單**：
+
+```
+IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`,
+`tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed
+or after you have verified that a dedicated tool cannot accomplish your
+task. Instead, use the appropriate dedicated tool:
+
+ - File search: Use Glob (NOT find or ls)
+ - Content search: Use Grep (NOT grep or rg)
+ - Read files: Use Read (NOT cat/head/tail)
+ - Edit files: Use Edit (NOT sed/awk)
+ - Write files: Use Write (NOT echo >/cat <<EOF)
+ - Communication: Output text directly (NOT echo/printf)
+```
+
+**工程決策**：這個清單是**防禦性設計**——它預測了 Claude 最容易犯的錯誤（習慣用 Bash 做一切），然後在 prompt 層面主動對抗這個傾向。這種設計模式比在訓練時修正行為偏差更可控、更即時。
+
+**代價**：Claude 必須在每次想使用 Bash 之前，先確認沒有更好的專用工具。這增加了一個「工具選擇的元認知步驟」，在複雜任務中稍微增加了 token 消耗。
+
+### Layer 2：操作安全守則
+
+```
+# Instructions
+ - If your command will create new directories or files, first use this
+   tool to run `ls` to verify the parent directory exists.
+ - Always quote file paths that contain spaces with double quotes.
+ - Try to maintain your current working directory throughout the session
+   by using absolute paths and avoiding usage of `cd`.
+ - You may specify an optional timeout in milliseconds (up to 600000ms).
+   By default, your command will timeout after 120000ms (2 minutes).
+ - You can use the `run_in_background` parameter to run the command in
+   the background. Only use this if you don't need the result immediately.
+```
+
+並行命令策略是一個精心設計的三路分支：
+
+```
+ - If the commands are independent and can run in parallel,
+   make multiple Bash tool calls in a single message.
+ - If the commands depend on each other and must run sequentially,
+   use a single Bash call with '&&' to chain them together.
+ - Use ';' only when you need to run commands sequentially but
+   don't care if earlier commands fail.
+ - DO NOT use newlines to separate commands.
+```
+
+**工程決策**：這個三路分支（多次工具呼叫 vs. `&&` vs. `;`）對應三種不同的語義：
+- **多次呼叫**：並行執行，最快，適合無依賴的獨立任務
+- **`&&` 鏈**：串行且錯誤傳播，後續命令依賴前序成功
+- **`;` 鏈**：串行但忽略錯誤，罕見，僅當後續命令無論如何都要執行時
+
+過去未明確這個區別時，Claude 傾向於用 `&&` 串接所有命令（因為訓練資料中這是最常見的模式），導致可以並行的任務被強制串行，效率大幅降低。
+
+**`sleep` 的明確禁止**：
+
+```
+ - Do not sleep between commands that can run immediately — just run them.
+ - If your command is long running, use `run_in_background`. No sleep needed.
+ - Do not retry failing commands in a sleep loop — diagnose the root cause.
+```
+
+禁止 `sleep` 的理由與其說是技術性的，不如說是哲學性的：sleep 是「不確定性的代理解法」——當 Claude 不確定命令何時完成時，它傾向於 sleep 等待。但 sleep 本質上是**靠猜測的時序管理**。`run_in_background` 是正確的解法：系統會在任務完成時通知 Claude，而不需要 Claude 猜測需要等多久。
+
+### Layer 3：Git Safety Protocol
+
+這是整個 tool description 中最詳細、最精密的部分，篇幅超過 900 字。
+
+**背景**：Git 操作是高危地帶。`git reset --hard`、`git push --force`、`git clean -f` 都可以在瞬間消滅使用者的工作。Claude Code 在自主執行任務時有時會把「解決障礙」和「繞過安全機制」混為一談，導致用破壞性操作來「修復」問題。
+
+Git Safety Protocol 的核心禁止清單（**Git Safety Protocol**）：
+
+```
+Git Safety Protocol:
+- NEVER update the git config
+- NEVER run destructive git commands (push --force, reset --hard,
+  checkout ., restore ., clean -f, branch -D) unless the user
+  explicitly requests these actions.
+- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the
+  user explicitly requests it
+- NEVER run force push to main/master, warn the user if they request it
+- CRITICAL: Always create NEW commits rather than amending, unless the
+  user explicitly requests a git amend. When a pre-commit hook fails,
+  the commit did NOT happen — so --amend would modify the PREVIOUS
+  commit, which may result in destroying work or losing previous changes.
+- NEVER commit changes unless the user explicitly asks you to.
+```
+
+**關於 `--amend` 的 CRITICAL 警告**解決了一個極其微妙的錯誤：
+
+1. Claude 嘗試提交，pre-commit hook 失敗
+2. Claude 修正問題，用 `git commit --amend` 重試
+3. **問題**：hook 失敗意味著原本那次提交**根本沒有發生**——`--amend` 修改的是**前一個真正完成的提交**，不是「失敗的那次嘗試」
+4. 結果：前一個提交被意外修改，可能造成 history rewriting
+
+這個細節在沒有 system prompt 明確說明的情況下，連有經驗的工程師也容易犯錯。
+
+提交工作流程的設計（四步驟流程）：
+
+```
+1. 並行執行：
+   - git status（查看未追蹤檔案）
+   - git diff（查看 staged + unstaged 變更）
+   - git log（了解 commit 訊息風格）
+
+2. 分析並草擬 commit 訊息
+   - Summarize the nature of the changes (new feature, bug fix, etc.)
+   - Do not commit files that likely contain secrets (.env, credentials)
+   - Focus on the "why" rather than the "what"
+
+3. 並行執行：
+   - git add <specific files>（不用 git add -A 或 git add .）
+   - git commit -m "$(cat <<'EOF' ... EOF)"（HEREDOC 格式）
+
+4. 如果 hook 失敗：修復問題，建立 NEW commit（不 amend）
+```
+
+**HEREDOC 強制格式**的設計原因：
+
+```
+# 正確方式
+git commit -m "$(cat <<'EOF'
+  Commit message here.
+
+  Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+  EOF
+  )"
+```
+
+標準的 `git commit -m "message"` 在多行訊息中容易受到 shell 特殊字符（`$`、backtick、引號）干擾。HEREDOC 提供了一個不受 shell 解析影響的安全邊界，確保 commit 訊息原文保留，包括換行符號。這是一個在 shell scripting 中廣為人知的最佳實踐，但沒有明確指令的話 LLM 不會主動選擇它。
+
+---
+
+## 14.3 AgentTool Prompt — 告訴 Claude 何時 Fork
+
+**原始碼位置：** `src/tools/AgentTool/prompt.ts`，核心函數 `getPrompt()`
+
+AgentTool 的 prompt 是一個**meta-prompt**：它告訴 Claude 如何使用 Agent tool、何時該用、如何撰寫子代理的 prompt。
+
+### 工具描述的開篇：角色定位
+
+```
+Launch a new agent to handle complex, multi-step tasks autonomously.
+
+The Agent tool launches specialized agents (subprocesses) that autonomously
+handle complex tasks. Each agent type has specific capabilities and tools
+available to it.
+```
+
+這個開篇在 Ch.03 分析的 Agent 架構中有直接對應：子代理是**真正的獨立執行單元**，有自己的上下文視窗、自己的工具集，不共享主代理的對話歷史（除了 prompt cache prefix）。
+
+### 動態注入：Agent 列表
+
+AgentTool 的 `getPrompt()` 函數接受一個 `agentDefinitions` 參數，動態生成可用的 agent 類型列表。這個列表在不同的 Claude Code 部署中是不同的（標準安裝 vs. compound-engineering 配置），是整個 system prompt 中**少數完全動態生成的部分**之一：
+
+```typescript
+// src/tools/AgentTool/prompt.ts
+export function getPrompt(agentDefinitions: AgentDefinition[]): string {
+  const agentList = agentDefinitions
+    .map(agent => `- ${agent.name}: ${agent.description}`)
+    .join('\n')
+
+  return `Launch a new agent to handle complex, multi-step tasks...
+
+Available agent types and the tools they have access to:
+${agentList}
+
+When using the Agent tool, specify a subagent_type parameter...`
+}
+```
+
+這個設計讓 Claude 在呼叫 Agent tool 時能準確說明每個 agent 類型的能力，而不是猜測。
+
+### "When NOT to use" 模式
+
+```
+When NOT to use the Agent tool:
+- If you want to read a specific file path, use the Read tool or the
+  Glob tool instead of the Agent tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo",
+  use the Glob tool instead, to find the match more quickly
+- If you are searching for code within a specific file or set of 2-3 files,
+  use the Read tool instead of the Agent tool, to find the match more quickly
+- Other tasks that are not related to the agent descriptions above
+```
+
+這個清單解決了一個真實問題：Agent 工具很**吸引人**，因為它「可以做任何事」。當 Claude 不確定該用哪個工具時，它容易預設選擇 Agent——「讓子代理去研究吧」。但 Agent 的代價是顯著的：啟動延遲、額外 API 呼叫成本、獨立的 context window。對於簡單的檔案讀取，這是殺雞用牛刀。
+
+### 前景 vs. 背景的明確框架
+
+```
+Usage notes:
+- Launch multiple agents concurrently whenever possible, to maximize
+  performance; to do that, use a single message with multiple tool uses
+- When the agent is done, it will return a single message back to you.
+  The result returned by the agent is not visible to the user.
+- You can optionally run agents in the background using the
+  run_in_background parameter. When an agent runs in the background,
+  you will be automatically notified when it completes — do NOT sleep,
+  poll, or proactively check on its progress.
+- **Foreground vs background**: Use foreground (default) when you need
+  the agent's results before you can proceed. Use background when you
+  have genuinely independent work to do in parallel.
+```
+
+**工程決策**：「結果對使用者不可見」這條說明解決了 Claude 的一個隱性誤解。Claude 可能認為「子代理的工作使用者會直接看到」，因此在子代理完成後不需要向使用者彙報。但實際上，子代理的輸出只傳回給呼叫它的主代理，使用者需要主代理的文字輸出才能得知結果。這條說明確保了資訊傳遞的完整性。
+
+### `isolation: "worktree"` 的最新設計
+
+```
+- You can optionally set `isolation: "worktree"` to run the agent in a
+  temporary git worktree, giving it an isolated copy of the repository.
+  The worktree is automatically cleaned up if the agent makes no changes;
+  if changes are made, the worktree path and branch are returned in the result.
+```
+
+這個功能是 Agent tool 的最新演進。Worktree isolation 讓每個子代理在獨立的 git 工作樹中操作，避免多個並行子代理在同一個 working copy 上產生衝突。這是直接回應了真實世界的使用場景：當多個代理同時修改不同功能時，沒有隔離會導致難以除錯的狀態衝突。
+
+---
+
+## 14.4 TodoWriteTool Prompt — 工作管理哲學
+
+**原始碼位置：** `src/tools/TodoWriteTool/prompt.ts`，核心常數 `PROMPT`
+
+TodoWriteTool 是 Claude Code 中最具「哲學色彩」的工具。它的 prompt 不只是操作說明——它是 Anthropic 對「Claude 應該如何管理複雜任務」的系統性回答。
+
+### 任務管理的兩個維度
+
+TodoWriteTool 的 prompt 定義了任務的兩個核心維度：
+
+```typescript
+// TodoWriteTool 任務的型別結構
+type TodoItem = {
+  id: string
+  content: string        // 任務描述（必填）
+  status: 'pending'      // 等待執行
+         | 'in_progress' // 進行中（同時只能有一個）
+         | 'completed'   // 已完成
+  priority: 'high' | 'medium' | 'low'
+}
+```
+
+**`status` 的語義約束**：`in_progress` 狀態在任意時刻**只能有一個任務**。這不是技術限制——而是刻意的設計。强迫 Claude 在任意時刻只有一個「進行中」的任務，防止了「同時做十件事、沒有一件做完」的行為模式（這是 LLM 的已知弱點之一）。
+
+### 何時使用 vs. 何時不使用
+
+```
+## When to use this tool
+
+Use this tool proactively in these scenarios:
+- Complex multi-step tasks — When a task requires 3 or more distinct
+  steps or actions
+- Non-trivial and complex tasks — Tasks that require careful planning
+  or multiple operations
+- User explicitly requests todo list — When the user directly asks
+- User provides multiple tasks — When users provide a list of things
+  to be done (numbered or comma-separated)
+- After receiving new instructions — Immediately capture user
+  requirements as tasks
+- When you start working on a task — Mark it as in_progress BEFORE
+  beginning work
+- After completing a task — Mark it as completed and add any new
+  follow-up tasks discovered during implementation
+```
+
+**「開始前標記 in_progress」**是一個關鍵的流程約束。沒有這條規則，Claude 可能先做完任務，再回來更新狀態——這讓使用者在任務執行期間看到的 todo 清單永遠是「剛剛才開始」的狀態，無法追蹤即時進度。
+
+```
+## When NOT to use this tool
+
+Skip using this tool when:
+- There is only a single, straightforward task
+- The task is trivial and tracking it provides no organizational benefit
+- The task can be completed in less than 3 trivial steps
+- The task is purely conversational or informational
+```
+
+**工程決策**：這個「不使用」清單解決了 TodoWrite 本身的過度使用問題。LLM 在學習到新工具後，傾向於在所有情境都使用它（因為訓練中使用工具通常得到正向反饋）。但 TodoWrite 有 UI 開銷——每次更新都產生一個可見的 UI 事件。對一個只需要一步完成的請求，顯示 todo 清單反而讓互動感覺更繁瑣。
+
+### Task Subject 的規範
+
+```
+- subject: A brief, actionable title in imperative form
+  (e.g., "Fix authentication bug in login flow")
+- description: What needs to be done
+- activeForm (optional): Present continuous form shown in the spinner
+  when the task is in_progress (e.g., "Fixing authentication bug").
+  If omitted, the spinner shows the subject instead.
+```
+
+**三種時態的設計邏輯**：
+
+| 欄位 | 時態 | 用途 | 範例 |
+|------|------|------|------|
+| `subject` | 命令式 | 永久標籤 | "Fix auth bug" |
+| `activeForm` | 進行時 | spinner 顯示 | "Fixing auth bug" |
+| `description` | 任意 | 詳細說明 | "The JWT refresh..." |
+
+UI 設計的原因：`subject`（命令式）讓任務清單讀起來像一個行動計畫；`activeForm`（進行時）讓 spinner 動畫有意義（"正在修復..."）。兩者用途不同，所以分成兩個欄位，而不是讓 Claude 根據上下文判斷該用哪個時態。
+
+---
+
+## 14.5 Compact Prompt — Context 壓縮的指令設計
+
+**原始碼位置：** `src/services/compact/prompt.ts`
+
+Context 壓縮（Compaction）是 Claude Code 最精妙的服務之一：當 context window 接近上限，它讓 Claude 對**自己的對話歷史進行自我摘要**，把 50k token 的歷史壓縮成 5k token 的摘要。這需要一套非常特殊的 prompt 設計。
+
+### 問題：壓縮時如何防止 Claude 繼續工作？
+
+最直觀的 compact prompt 設計：「請幫我總結這段對話」。但這個設計有一個致命問題——Claude 在收到這個請求後，可能會嘗試「幫忙把任務做完」，包括呼叫工具（讀取檔案、執行命令），因為它判斷這些行動有助於總結。
+
+但 compact 服務的目標恰恰相反：它需要 Claude **只產生文字摘要**，不做任何工具呼叫。工具呼叫會消耗 token（正是我們試圖節省的）、引入副作用（可能破壞正在進行的任務），以及延長壓縮的等待時間。
+
+### 解決方案：NO_TOOLS_PREAMBLE + NO_TOOLS_TRAILER
+
+`compact/prompt.ts` 使用了一個精心設計的「三明治結構」：
+
+```typescript
+// src/services/compact/prompt.ts
+
+const NO_TOOLS_PREAMBLE = `
+<important>
+For this task, you will NOT use any tools or make any tool calls.
+Your response should be pure text only.
+</important>
+`
+
+const BASE_COMPACT_PROMPT = `
+Your task is to create a detailed summary of the conversation so far, paying
+close attention to the user's explicit requests and your previous actions,
+with a focus on what has been done and what still needs to be done.
+
+${NO_TOOLS_PREAMBLE}
+
+Please write a comprehensive summary that:
+1. States the user's overall goal or request
+2. Lists all actions taken so far (tool calls made, files modified,
+   commands executed)
+3. Captures the current state of work (what's done, what's pending)
+4. Preserves important context (file paths, error messages, key decisions)
+5. Notes any blockers or issues encountered
+
+${NO_TOOLS_TRAILER}
+`
+
+const NO_TOOLS_TRAILER = `
+<reminder>
+Do NOT use any tools. Return only text.
+</reminder>
+`
+```
+
+**三明治策略**的設計原理：
+- **前置聲明（Preamble）**：在 Claude 讀到任務描述之前，先建立「無工具模式」的框架
+- **任務描述**：具體說明需要做什麼
+- **後置提醒（Trailer）**：在 Claude 開始生成回應之前，再次強化限制
+
+LLM 的注意力在序列末尾更強（recency bias）。Trailer 的存在是對這個偏差的直接補償。
+
+### BASE_COMPACT_PROMPT vs. PARTIAL_COMPACT_PROMPT
+
+```typescript
+const PARTIAL_COMPACT_PROMPT = `
+${NO_TOOLS_PREAMBLE}
+
+This is a partial compaction. Summarize ONLY the recent portion of the
+conversation that is marked for compaction (marked with <compact-this>
+tags). Preserve the earlier part of the conversation as-is.
+
+Focus on:
+- What was being worked on in this portion
+- Tool calls made and their results
+- Current state at the end of this section
+
+${NO_TOOLS_TRAILER}
+`
+```
+
+兩種 compact 模式的選擇邏輯：
+
+| 情況 | 使用的 Prompt | 說明 |
+|------|------|------|
+| 整個對話超過閾值 | `BASE_COMPACT_PROMPT` | 全量壓縮 |
+| 只有最近部分超出 | `PARTIAL_COMPACT_PROMPT` | 保留早期對話，只壓縮最近片段 |
+
+Partial compact 是效率優化：如果對話的早期部分已被良好地索引（例如，包含原始任務描述），就沒有必要重新壓縮它。只壓縮「最新的增量」可以更精確地控制 token 預算。
+
+### `formatCompactSummary()` — `<analysis>` 標籤的剝離
+
+```typescript
+// src/services/compact/prompt.ts
+export function formatCompactSummary(rawResponse: string): string {
+  // Claude 有時會在回應中包含 <analysis> 思考標籤
+  // 這些思考過程不應該被插入壓縮後的 context
+  const withoutAnalysis = rawResponse.replace(
+    /<analysis>[\s\S]*?<\/analysis>/g,
+    ''
+  )
+  return withoutAnalysis.trim()
+}
+```
+
+**工程決策**：當 Claude 被要求進行複雜的分析任務時，它可能產生 `<analysis>...</analysis>` 標籤來組織思考過程。這些標籤對於 Claude 的推理有幫助，但如果被直接插入壓縮後的 context，會造成兩個問題：第一，後續的 Claude 實例可能誤讀這些標籤（認為它代表某種已確認的分析，而非思考過程）；第二，`<analysis>` 內容通常比摘要更長，插入後反而增加了 context 長度。
+
+---
+
+## 14.6 Memory Prompts — 三層記憶系統的 Prompt 設計
+
+Claude Code 的記憶系統有三個不同的 prompt 層，每一個解決記憶生命週期的不同階段：
+
+```
+使用時  → teamMemPrompts.ts     （注入 system prompt Section 9）
+生成時  → extractMemories       （背景 subagent 抽取新記憶）
+整合時  → autoDream             （夜間整合，消除冗餘）
+```
+
+### 14.6.1 `teamMemPrompts.ts` — 記憶注入的使用說明
+
+**原始碼位置：** `src/memdir/teamMemPrompts.ts`，函數 `buildCombinedMemoryPrompt()`
+
+這個 prompt 是 Section 9（Memory section）的實際內容。它告訴 Claude：「你有一個記憶系統，它包含什麼，以及如何使用它」。
+
+```
+# Auto Memory
+
+You have a persistent, file-based memory system at [memory_dir].
+This directory already exists — write to it directly with the Write tool.
+
+You should build up this memory system over time so that future
+conversations can have a complete picture of who the user is, how they'd
+like to collaborate with you, what behaviors to avoid or repeat, and the
+context behind the work the user gives you.
+```
+
+記憶的四種類型及其精確邊界定義：
+
+| 類型 | 何時存入 | 如何使用 |
+|------|----------|----------|
+| `user` | 了解使用者角色、目標、偏好、知識時 | 根據使用者輪廓調整未來行為 |
+| `feedback` | 使用者糾正做法（或確認非顯見做法奏效）時 | 讓使用者不必重複給出相同指導 |
+| `project` | 了解正在進行的工作、目標、截止日期時 | 更好地理解請求背後的動機 |
+| `reference` | 了解外部資源在哪裡時 | 知道去哪裡找資訊 |
+
+**「何時不存入記憶」清單**（與 CLAUDE.md 的差異）：
+
+```
+## What NOT to save in memory
+
+- Code patterns, conventions, architecture, file paths, or project structure
+  — these can be derived by reading the current project state.
+- Git history, recent changes, or who-changed-what — git log / git blame
+  are authoritative.
+- Debugging solutions or fix recipes — the fix is in the code; the commit
+  message has the context.
+- Anything already documented in CLAUDE.md files.
+- Ephemeral task details: in-progress work, temporary state, current
+  conversation context.
+```
+
+**工程決策**：這個清單的設計原則是**不重複已有的持久化機制**。程式碼已經在 git；專案慣例已經在 CLAUDE.md；Git 歷史可以用 `git log` 查詢。如果把這些都塞進記憶系統，記憶系統會迅速膨脹成一個難以維護的資訊集合，且與原始來源產生版本不一致的問題。
+
+### 14.6.2 `extractMemories/prompts.ts` — 背景記憶抽取
+
+**原始碼位置：** `src/services/extractMemories/prompts.ts`
+
+這是在每次對話結束後，在背景執行的記憶抽取 subagent 的 prompt。
+
+```
+You are a memory extraction specialist. Your task is to analyze a
+conversation and extract key information worth remembering for future
+conversations.
+
+Review the conversation carefully and identify:
+1. User preferences, working styles, or explicit feedback
+2. Project context, goals, and constraints that are non-obvious
+3. External resources or references the user pointed you to
+4. Non-obvious patterns you should repeat or avoid
+
+For each piece of information worth remembering:
+- Determine the correct memory type (user/feedback/project/reference)
+- Write it to the memory directory using the Write tool
+- Update MEMORY.md index with a one-line pointer
+
+Guidelines:
+- Only save information that would actually be useful in a DIFFERENT
+  future conversation, not just for this session
+- Prefer updating existing memory files over creating new ones
+- Keep memory concise — this is a reference, not a log
+- Convert relative dates to absolute dates (e.g., "Thursday" → "2026-03-05")
+```
+
+**「不同的未來對話」這條標準**是整個 prompt 中最重要的設計決策。它解決了記憶系統的核心問題：如果不加限制，記憶系統會趨向於「存入所有發生過的事」，成為一個無限增長的日誌。這條標準強迫 subagent 問一個具體問題：「如果下週開始一個新的 session，這條記憶有用嗎？」
+
+**相對日期轉換**是另一個精心設計：「星期四需要完成」在當週之外毫無意義，但「2026-03-05 前完成」永遠有意義。記憶系統的設計目標是「在時間流逝後仍然有效」，絕對日期是確保這一點的技術手段。
+
+### 14.6.3 `autoDream/consolidationPrompt.ts` — 夜間記憶整合
+
+**原始碼位置：** `src/services/autoDream/consolidationPrompt.ts`
+
+AutoDream 是整個 Claude Code codebase 中最具哲學色彩的服務。它在使用者不活躍期間（類似「夢境整合」）執行記憶整合，把多次對話累積的記憶去重和組織。
+
+```typescript
+// src/services/autoDream/consolidationPrompt.ts
+export const DREAM_CONSOLIDATION_PROMPT = `
+You are performing memory consolidation — similar to how the human brain
+consolidates memories during sleep.
+
+Your task: Review all memory files in the memory directory and consolidate
+them to be more useful, concise, and non-redundant.
+
+Process:
+1. Read all memory files and MEMORY.md index
+2. Identify redundant or overlapping memories
+3. Merge related memories into more comprehensive entries
+4. Remove stale or no-longer-relevant memories
+5. Update MEMORY.md index to reflect changes
+
+Consolidation principles:
+- Preserve the most specific and actionable information
+- When two memories conflict, keep the more recent one
+- Merge memories of the same type about the same topic
+- Remove memories about completed one-time tasks
+- Keep the total memory footprint under 25KB / 200 lines
+
+After consolidation, the memory system should feel like:
+- A thoughtful person's notes about working with this user
+- Not an exhaustive log
+- Not duplicative
+- Actionable in the next conversation
+`
+```
+
+**「類似人類大腦睡眠鞏固記憶」的比喻**不只是文學修辭——它是一個具體的設計規格。人類睡眠中的記憶鞏固有以下特徵：
+1. 情節記憶（「發生了什麼」）轉化為語義記憶（「我知道什麼」）
+2. 去除冗餘細節，保留核心模式
+3. 整合跨時段的片段資訊
+
+`DREAM_CONSOLIDATION_PROMPT` 的每個步驟都對應這個過程：步驟 2（去重）→ 步驟 3（整合）→ 步驟 4（清除過時）。
+
+**25KB / 200 行的上限**是一個工程約束：記憶系統每次 session 都會被完整注入 system prompt（Section 9）。如果沒有上限，長期使用者的記憶系統可能增長到數十 KB，顯著增加每次 API 呼叫的 token 消耗。25KB 的上限在「記憶完整性」和「API 成本」之間取得平衡。
+
+---
+
+## 14.7 Coordinator Prompt — 多 Agent 協調的指揮官指令
+
+**原始碼位置：** `src/coordinator/coordinatorMode.ts`，函數 `getCoordinatorSystemPrompt()`
+
+Coordinator Prompt 是 Claude Code prompt 體系中最特殊的一個：它**完全替換**預設的 system prompt（bypassing 所有 17 個 section），讓 Claude 進入一種截然不同的操作模式。
+
+如 Ch.12 所述，啟用條件是 `feature('COORDINATOR_MODE')` 和環境變數 `CLAUDE_CODE_COORDINATOR_MODE=1`。一旦啟用，`buildEffectiveSystemPrompt()` 在 Layer 1 攔截，直接回傳 `getCoordinatorSystemPrompt()` 的輸出，所有標準 section 都被跳過。
+
+### Coordinator 的角色宣告
+
+```
+You are a coordinator agent for Claude Code. Your role is fundamentally
+different from a standard Claude Code agent:
+
+STANDARD AGENT: Executes tasks directly using tools (Bash, Read, Edit, etc.)
+COORDINATOR: Orchestrates other agents to execute tasks; you delegate, you
+             do not execute directly.
+
+Your primary tools are:
+- Agent tool: Launch new Worker agents to handle subtasks
+- SendMessage tool: Continue communication with an existing Worker
+- TaskStop tool: Terminate a Worker that has completed or is stuck
+```
+
+**角色的根本差異**是 Coordinator prompt 最重要的設計決策。標準的 Claude Code 是一個「工人」——它直接使用工具完成任務。Coordinator 是「指揮官」——它的工作是分解任務、指派工人、整合結果。
+
+這個區別必須明確寫進 prompt，因為 Claude 的訓練預設是「盡力直接完成任務」。如果 Coordinator 沒有被明確告知「你不應該直接執行工具」，它可能在認為「這個小任務我自己做比較快」時繞過 Worker 架構，破壞整個協調設計。
+
+### Worker 通訊協議：`<task-notification>` XML
+
+```
+## Communication Protocol
+
+Workers communicate results back to you through <task-notification> XML
+format, which is delivered as user-role messages:
+
+<task-notification>
+  <agent-name>worker-agent-1</agent-name>
+  <status>completed|in_progress|failed</status>
+  <summary>Brief summary of what was accomplished</summary>
+  <details>
+    Detailed output, file changes, errors encountered, etc.
+  </details>
+</task-notification>
+
+When you receive a task-notification:
+1. Parse the status to determine if the Worker is done
+2. If completed: integrate the results into your overall plan
+3. If in_progress: acknowledge and wait for completion notification
+4. If failed: decide whether to retry, reassign, or handle the failure
+```
+
+**XML 格式的選擇**解決了 Coordinator 和 Worker 之間的資訊結構化問題。如果 Worker 只是傳回純文字，Coordinator 需要解析自然語言才能理解「任務是否完成」、「發生了什麼錯誤」、「修改了哪些文件」。XML 標籤提供了機器可讀的結構：`<status>completed</status>` 比「我已經完成了」更可靠地被解析。
+
+### Scratchpad 共享機制
+
+```
+## Shared Workspace
+
+You have access to a shared scratchpad directory at [scratchpad_dir].
+Workers can read and write files here without permission prompts.
+Use this directory for:
+- Inter-worker communication (e.g., worker A produces data for worker B)
+- Storing intermediate results
+- Coordination artifacts (work queue, progress tracking)
+
+Note: Files in the scratchpad are ephemeral for this session.
+```
+
+Scratchpad 解決了多 Agent 協調中的一個根本問題：**Agent 間如何共享大量資料？** 透過 SendMessage 傳遞大量文字是低效且不可靠的；讓 Worker A 直接修改主工作目錄並讓 Worker B 讀取則需要複雜的並行控制。
+
+Scratchpad 是一個折衷方案：一個輕量的共享檔案空間，有寬鬆的權限（無需確認），但生命週期僅限於當前 session。這讓 Worker 間可以有效共享結構化資料（JSON、markdown 摘要），同時不影響主工作目錄的完整性。
+
+### Coordinator vs. Standard Agent Prompt 對比
+
+| 面向 | Standard Agent | Coordinator |
+|------|---------------|-------------|
+| 操作模式 | 直接執行工具 | 只透過 Agent/SendMessage 委派 |
+| 可用工具 | 全套工具（Bash、Read、Edit...）| Agent、SendMessage、TaskStop |
+| System Prompt | 17 個 Section 完整套件 | 只有 Coordinator Prompt + appendSystemPrompt |
+| 任務分解 | 由 TodoWrite 追蹤 | 由 Worker 分配隱性管理 |
+| 完成條件 | Claude 直接達成 | 等待所有 Worker task-notification |
+| 失敗處理 | 自行重試或詢問使用者 | 終止 Worker，重新指派或向使用者升報 |
+
+---
+
+## 14.8 跨 Prompt 的設計模式總結
+
+讀完以上七種 prompt，可以看到幾個一再出現的設計模式：
+
+### 模式一：「When NOT to use」清單
+
+BashTool（不要用 bash 做 grep/cat）、AgentTool（不要用 agent 做簡單搜索）、TodoWriteTool（不要對單步任務建 todo）——每個工具都有明確的**反使用案例清單**。
+
+這個模式的根本原因：**LLM 天然傾向於過度使用它學會的工具**。當 Claude 學習到一個工具「有效」之後，它傾向於在所有相似情境都使用它。「When NOT to use」清單是對這個傾向的防禦性設計。
+
+### 模式二：NO_TOOLS 強制邊界
+
+Compact prompt 的 `NO_TOOLS_PREAMBLE + NO_TOOLS_TRAILER` 是一個極端版本。它不只是說「盡量不要用工具」，而是用前後雙重框架強制限制。這個模式應用於「工具呼叫會產生不可接受的副作用」的場景。
+
+### 模式三：XML 結構化通訊
+
+Coordinator prompt 的 `<task-notification>` 是 Claude Code 中廣泛使用的 XML 標籤模式之一。在強制性的結構化資訊傳遞場景中，XML 比 JSON 更可靠——它更能適應 Claude 偶爾的格式不一致，因為 XML 解析器比 JSON 解析器更寬容。
+
+### 模式四：絕對命令 vs. 相對指引
+
+每個 tool prompt 都同時包含**絕對命令**（"NEVER skip hooks"、"CRITICAL: Always create NEW commits"）和**相對指引**（"Prefer to create a new commit rather than amending"）。
+
+絕對命令對應那些失敗代價極高的行為（不可逆操作、安全漏洞）；相對指引對應那些「一般情況下」的最佳實踐，但有合理的例外情境。區分這兩類指令的嚴格程度，讓 Claude 在面對「使用者明確要求破例」時能做出正確判斷——對絕對命令的破例需要更強的明確授權，對相對指引的破例則有更大的彈性。
+
+---
+
+:::tip[本章結語]
+本書至此完整呈現了 Claude Code 的 prompt 生態系：從 Ch.11 的架構設計，到 Ch.13 的 system prompt 逐節解析，再到本章的 tool prompt 和 service prompt 全文。
+
+如果說 Claude Code 是一個自主工程代理，那麼 prompt 是它的**神經系統**——不只是指令，而是塑造判斷力、建立安全邊界、定義協作協議的完整規範體系。每一個設計決策背後，都有一個真實的失敗案例，或一個被反覆驗證的行為傾向。理解這些 prompt，就是理解 Anthropic 工程師如何思考「讓 AI 可靠行動」這個問題的答案。
+:::
