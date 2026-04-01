@@ -1,5 +1,5 @@
 ---
-title: "Skills & Plugin System — 技能與插件"
+title: "Skills & Plugin System — 技能與外掛"
 description: "Skill 定義與發現機制、MCP 協議整合、Plugin 生命週期管理、以及擴展生態系統"
 sidebar:
   order: 8
@@ -9,7 +9,7 @@ sidebar:
 Ch.07 的 query loop 是整個系統的心跳。Skill 的執行方式就是：在同一個 query loop 內，遞迴地呼叫自身。本章解釋這個遞迴呼叫繼承了什麼、不繼承什麼——以及 MCP 如何讓外部伺服器加入這個生態系統。
 :::
 
-## 為什麼需要技能與插件？
+## 為什麼需要技能與外掛？
 
 Claude Code 的核心提供了「通用」的工程代理能力。但真實世界的開發者有高度特化的需求：
 - 前端團隊需要元件生成技能
@@ -427,7 +427,7 @@ Claude → 呼叫 MCP 工具
 Claude ← 收到 MCP 工具的最終結果
 ```
 
-在 Claude Code 的源碼中，post-sampling 鉤子機制透過 `registerPostSamplingHook` 和 `executePostSamplingHooks` 提供了類似的「模型回應後執行邏輯」能力，並在 `query.ts` 的主迴圈中，每次 LLM 回應完成後執行：
+在 Claude Code 的原始碼中，post-sampling 鉤子機制透過 `registerPostSamplingHook` 和 `executePostSamplingHooks` 提供了類似的「模型回應後執行邏輯」能力，並在 `query.ts` 的主迴圈中，每次 LLM 回應完成後執行：
 
 ```typescript
 // src/query.ts — 模型回應後執行 post-sampling hooks
@@ -451,9 +451,9 @@ if (assistantMessages.length > 0) {
 
 ## Plugin 安全模型：擴展點的邊界
 
-一個可以自行授予權限的插件，就是一個安全漏洞。Claude Code 的 Plugin 系統從設計上封堵了這個攻擊面。
+一個可以自行授予權限的外掛，就是一個安全漏洞。Claude Code 的 Plugin 系統從設計上封堵了這個攻擊面。
 
-**問題**：Plugins 可以提供工具和 hooks——如果沒有清晰的邊界，惡意插件可以宣稱自己需要任何權限，或者覆寫系統的拒絕規則。
+**問題**：Plugins 可以提供工具和 hooks——如果沒有清晰的邊界，惡意外掛可以宣稱自己需要任何權限，或者覆寫系統的拒絕規則。
 
 **安全設計**：Plugin 提供的工具進入與內建工具完全相同的 `checkPermissionsAndCallTool` 管道（`src/services/tools/toolExecution.ts`）。沒有任何特殊快速通道——一個 MCP plugin 工具和 `BashTool` 走相同的 `toolPermissionContext` 查詢邏輯。
 
@@ -464,13 +464,13 @@ if (assistantMessages.length > 0) {
 
 ```typescript
 // src/utils/plugins/pluginLoader.ts — mergePluginSources 中的管理保護
-// 受 policySettings 管理的插件，不能被 --plugin-dir 覆寫
+// 受 policySettings 管理的外掛，不能被 --plugin-dir 覆寫
 if (managed?.has(sessionPlugin.name)) {
   errors.push({ type: 'session-overrides-managed', ... })
   continue  // 直接丟棄 session plugin
 }
 
-// src/utils/plugins/managedPlugins.ts — 讀取企業管理的插件名單
+// src/utils/plugins/managedPlugins.ts — 讀取企業管理的外掛名單
 export function getManagedPluginNames(): Set<string> | null {
   const enabledPlugins = getSettingsForSource('policySettings')?.enabledPlugins
   // 只保護 boolean 型別的 plugin@marketplace 條目（true 或 false 都受保護）
@@ -491,7 +491,7 @@ const results = await Promise.allSettled(
 // results 中的 rejected 條目轉為 PluginError，不拋出異常
 ```
 
-**代價**：這個設計讓企業可以鎖定插件生態系統，但也意味著 plugin 無法為自己申請比父 session 更高的權限——如果一個 plugin 想要執行某項需要特殊權限的操作，它必須要求使用者在正確的 permission context 下執行 Claude Code。
+**代價**：這個設計讓企業可以鎖定外掛生態系統，但也意味著 plugin 無法為自己申請比父 session 更高的權限——如果一個 plugin 想要執行某項需要特殊權限的操作，它必須要求使用者在正確的 permission context 下執行 Claude Code。
 
 ---
 

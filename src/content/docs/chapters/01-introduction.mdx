@@ -18,7 +18,7 @@ sidebar:
 | Ch.05 | Hook System — 可擴展的生命週期 | Ch.02 | `HookEvent`、`pre_tool_use`、`post_tool_use`、外部程序集成 |
 | Ch.06 | Context Management — 上下文工程 | Ch.01, Ch.02 | `getSystemContext`、`getUserContext`、CLAUDE.md 注入、Compaction |
 | Ch.07 | Coordinator & Concurrency — 協調與並行 | Ch.02, Ch.03 | `query`、`queryLoop`、`QueryEngine`、工具並行執行 |
-| Ch.08 | Skills & Plugin System — 技能與插件 | Ch.02 | `initBundledSkills`、MCP server 協議、Plugin 安裝流程 |
+| Ch.08 | Skills & Plugin System — 技能與外掛 | Ch.02 | `initBundledSkills`、MCP server 協議、Plugin 安裝流程 |
 | Ch.09 | State Management — 狀態流 | Ch.07 | `AppState`、`AppStateStore`、`createStore`、`onChangeAppState` |
 | Ch.10 | 設計模式總結與啟示 | Ch.01–Ch.09 | 容錯設計、分層抽象、可觀測性模式 |
 | Ch.11 | Prompt Engineering — 系統提示詞設計 | Ch.06, Ch.09 | Prompt Cache、section system、`clearSystemPromptSections` |
@@ -88,7 +88,7 @@ graph TB
     SM --> AS[AppState Store]
 
     QL --> SK[Skills 技能]
-    QL --> PL[Plugins/MCP 插件]
+    QL --> PL[Plugins/MCP 外掛]
     QL --> TK[Task System 任務系統]
 
     style QL fill:#6366f1,color:#fff
@@ -115,7 +115,7 @@ graph TB
 | **State Management 狀態管理** | 維護全 session 的不可變狀態樹、驅動 React/Ink UI 更新 | `src/state/AppStateStore.ts`（`AppState`、`createStore`）、`src/state/onChangeAppState.ts` | Ch.09 |
 | **AppState Store** | 單一事實來源的 session 狀態；包含 MCP 連線清單、工具權限上下文、FPS 指標 | `src/state/AppStateStore.ts`、`src/state/store.ts` | Ch.09 |
 | **Skills 技能** | 提供使用者自定義的 slash command 擴展點，bundled 技能隨 Claude Code 預裝 | `src/skills/`、`src/skills/bundled/`（`initBundledSkills`） | Ch.08 |
-| **Plugins/MCP 插件** | 連接 MCP server、發現 MCP 工具並注入工具清單、管理插件生命週期 | `src/services/mcp/client.ts`（`getMcpToolsCommandsAndResources`）、`src/utils/plugins/` | Ch.08 |
+| **Plugins/MCP 外掛** | 連接 MCP server、發現 MCP 工具並注入工具清單、管理外掛生命週期 | `src/services/mcp/client.ts`（`getMcpToolsCommandsAndResources`）、`src/utils/plugins/` | Ch.08 |
 | **Task System 任務系統** | 管理長期任務狀態、追蹤工具執行進度 | `src/tasks.ts`、`src/Task.ts`、`src/tasks/` | Ch.09 |
 | **Forked Agent 子代理** | 在獨立上下文中執行子任務、與主代理隔離 | `src/tools/AgentTool/AgentTool.tsx`、`src/tools/AgentTool/builtInAgents.ts` | Ch.03 |
 | **Cache Sharing 快取共享** | 子代理共享主代理的 prompt cache prefix，減少重複 token 消耗 | `src/tools/AgentTool/AgentTool.tsx`、`src/utils/api.ts` | Ch.03 |
@@ -155,7 +155,7 @@ Claude Code 需要：
 
 ### 階段一：Module Loading（同步，import 階段）
 
-在 `src/main.tsx` 的模組頂層，三個關鍵函數按嚴格順序呼叫，這些呼叫發生在所有其他 import 之前：
+在 `src/main.tsx` 的模組頂層，三個關鍵函式按嚴格順序呼叫，這些呼叫發生在所有其他 import 之前：
 
 ```typescript
 // src/main.tsx — 模組頂層，必須在所有 import 之前執行
@@ -173,7 +173,7 @@ startKeychainPrefetch();  // 同時觸發 macOS keychain 讀取（OAuth + API ke
 
 ### 階段二：init()（非同步，信任建立前）
 
-`src/entrypoints/init.ts` 中的 `init()` 函數處理無需使用者信任即可執行的初始化：
+`src/entrypoints/init.ts` 中的 `init()` 函式處理無需使用者信任即可執行的初始化：
 
 ```typescript
 // src/entrypoints/init.ts
@@ -221,10 +221,10 @@ await connectMcpBatch(regularMcpConfigs, 'regular');
 
 ### setup.ts 的職責
 
-`src/setup.ts` 中的 `setup()` 函數處理與工作目錄和 session 環境相關的初始化：
+`src/setup.ts` 中的 `setup()` 函式處理與工作目錄和 session 環境相關的初始化：
 
 ```typescript
-// src/setup.ts — setup() 函數的關鍵步驟順序
+// src/setup.ts — setup() 函式的關鍵步驟順序
 export async function setup(cwd: string, permissionMode: PermissionMode, ...): Promise<void> {
   // 1. setCwd() 必須最先呼叫 — 後續所有依賴 cwd 的程式碼都需要它
   setCwd(cwd)
@@ -274,13 +274,13 @@ export async function setup(cwd: string, permissionMode: PermissionMode, ...): P
 
 ### 1. 輸入進入 Query Loop（→ Ch.07）
 
-你的輸入抵達 `src/query.ts` 的 `query()` 函數。`query()` 呼叫 `queryLoop()`，這是整個執行引擎的核心 generator 函數。`queryLoop` 收到的 `params` 包含：`systemPrompt`（已組裝好的提示詞）、`messages`（對話歷史）、`toolUseContext`（工具集合）、以及 `userContext`。
+你的輸入抵達 `src/query.ts` 的 `query()` 函式。`query()` 呼叫 `queryLoop()`，這是整個執行引擎的核心 generator 函式。`queryLoop` 收到的 `params` 包含：`systemPrompt`（已組裝好的提示詞）、`messages`（對話歷史）、`toolUseContext`（工具集合）、以及 `userContext`。
 
 此時，`queryLoop` 的第一個任務是**組裝第一個 API 呼叫**，但在送出之前，它需要確保 context 已準備好。
 
 ### 2. Context 組裝：CLAUDE.md 注入 + System Prompt 建構（→ Ch.06, Ch.11）
 
-在 API 呼叫發出前，`src/context.ts` 的 `getSystemContext()` 和 `getUserContext()` 已在啟動時被 prefetch（`startDeferredPrefetches()` 中觸發）。這兩個函數使用 `memoize` 快取結果。
+在 API 呼叫發出前，`src/context.ts` 的 `getSystemContext()` 和 `getUserContext()` 已在啟動時被 prefetch（`startDeferredPrefetches()` 中觸發）。這兩個函式使用 `memoize` 快取結果。
 
 System prompt 由 `src/constants/prompts.ts` 中的 section system 組裝。當你在專案根目錄有 `.claude/CLAUDE.md` 時，`src/utils/claudemd.ts` 負責讀取並解析它，將其內容注入為 system prompt 的一個 section。這個注入在每次 turn 時重新計算（因為 CLAUDE.md 可能在 session 中被修改），但靜態 section 會命中 Anthropic 推論伺服器的 prompt cache（→ Ch.11 詳解 cache 機制）。
 
@@ -344,7 +344,7 @@ Claude Code 的原始碼組織清晰地反映了這些子系統：
 | `src/utils/hooks.ts` | Hook 系統 | Ch.5 |
 | `src/context.ts` | 上下文管理 | Ch.6 |
 | `src/query.ts` | 主迴圈與並行 | Ch.7 |
-| `src/skills/`, `src/plugins/` | 技能與插件 | Ch.8 |
+| `src/skills/`, `src/plugins/` | 技能與外掛 | Ch.8 |
 | `src/state/` | 狀態管理 | Ch.9 |
 | `src/constants/prompts.ts` | 系統提示詞設計 | Ch.11 |
 

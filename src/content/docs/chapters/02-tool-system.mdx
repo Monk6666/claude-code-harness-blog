@@ -284,7 +284,7 @@ export function lazySchema<T>(factory: () => T): () => T {
 }
 ```
 
-它的簽名不是 `ZodSchema<T>`，而是 `() => T`——一個回傳 schema 的函式。呼叫端需要主動調用這個 getter：
+它的簽名不是 `ZodSchema<T>`，而是 `() => T`——一個回傳 schema 的函式。呼叫端需要主動呼叫這個 getter：
 
 ```typescript
 // src/tools/AgentTool/AgentTool.tsx — lazySchema 在 AgentTool 的實際應用
@@ -312,7 +312,7 @@ export const inputSchema = lazySchema(() => {
 ```typescript
 // src/tools/AgentTool/AgentTool.tsx
 get inputSchema(): InputSchema {
-  return inputSchema()  // 調用 lazySchema getter，觸發（或回傳快取的）schema 建構
+  return inputSchema()  // 呼叫 lazySchema getter，觸發（或回傳快取的）schema 建構
 },
 ```
 

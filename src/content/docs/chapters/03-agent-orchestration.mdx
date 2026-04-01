@@ -201,7 +201,7 @@ export function getLastCacheSafeParams(): CacheSafeParams | null {
 type ForkedAgentParams = {
   promptMessages: Message[];         // 子代理專屬的輸入訊息
   cacheSafeParams: CacheSafeParams;  // 共享的快取安全參數
-  canUseTool: CanUseToolFn;          // 權限檢查函數
+  canUseTool: CanUseToolFn;          // 權限檢查函式
   querySource: QuerySource;          // 分析追蹤
   forkLabel: string;                 // 遙測標籤
 };
@@ -465,7 +465,7 @@ git status                   ← 每次 commit 都改變
 其他即時上下文                 ← 動態
 ```
 
-`buildSystemPromptBlocks()` 函數讀取這個邊界，將邊界之前的 blocks 標記為可快取（加上 `cache_control`），邊界之後的 blocks 不加標記——它們每次都會重新計費，但不會污染靜態前綴的快取。
+`buildSystemPromptBlocks()` 函式讀取這個邊界，將邊界之前的 blocks 標記為可快取（加上 `cache_control`），邊界之後的 blocks 不加標記——它們每次都會重新計費，但不會污染靜態前綴的快取。
 
 :::tip[工程直覺]
 當有人說「把 git status 放到 system prompt 中」時，正確的問題是：「放在邊界的哪一側？」放在邊界前 = 每次 commit 都 bust 整個 50k token 的快取 = 每次 commit 多花 $0.75。放在邊界後 = 只有後綴重新計費。位置決定成本。

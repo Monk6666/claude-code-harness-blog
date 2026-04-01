@@ -225,11 +225,11 @@ export function startSpeculativeClassifierCheck(
 `bypassPermissions` 需要 `--dangerously-skip-permissions` CLI flag 才能啟用，並有 Statsig 遠端 killswitch（`bypassPermissionsKillswitch.ts`）可即時撤銷。這是一個有明確撤銷路徑的例外，而不是永久信任。
 :::
 
-## checkPermissionsAndCallTool：核心決策函數的完整路徑
+## checkPermissionsAndCallTool：核心決策函式的完整路徑
 
 每個 tool 呼叫都會掉進一個七步決策漏斗，但大多數呼叫在前三步就已離開。理解完整路徑，才能知道哪裡可以插入自訂邏輯、哪裡的決定不可逆。
 
-`checkPermissionsAndCallTool()` 是 `src/services/tools/toolExecution.ts` 中的核心函數，負責驗證輸入、啟動 speculative classifier、跑 pre-tool hooks，最後呼叫 `canUseTool()`（即 `hasPermissionsToUseTool()`）做出最終 permission 決定：
+`checkPermissionsAndCallTool()` 是 `src/services/tools/toolExecution.ts` 中的核心函式，負責驗證輸入、啟動 speculative classifier、跑 pre-tool hooks，最後呼叫 `canUseTool()`（即 `hasPermissionsToUseTool()`）做出最終 permission 決定：
 
 ```typescript
 // src/services/tools/toolExecution.ts
@@ -356,7 +356,7 @@ export async function awaitClassifierAutoApproval(
 
 **關鍵設計細節**：分類器使用 `speculativeChecks` Map（以 command string 為 key）。`consumeSpeculativeClassifierCheck()` 在取出 promise 後刪除 Map entry，確保每個投機檢查只被消費一次，不會被多個 handler 重複使用。
 
-**時序競賽的工程後果**：speculative check 在 `checkPermissionsAndCallTool` 函數的 input 驗證完成後立刻啟動，早於 `canUseTool()` 呼叫——這意味著即使 `hasPermissionsToUseTool` 因為某個規則提前返回 allow（不需要 classifier），那個飛行中的 classifier 請求仍然發出去了。系統靠 `consumeSpeculativeClassifierCheck` 的一次性消費語意和 `promise.catch(() => {})` 的靜默忽略來處理這個浪費，而不是試圖取消網路請求。
+**時序競賽的工程後果**：speculative check 在 `checkPermissionsAndCallTool` 函式的 input 驗證完成後立刻啟動，早於 `canUseTool()` 呼叫——這意味著即使 `hasPermissionsToUseTool` 因為某個規則提前返回 allow（不需要 classifier），那個飛行中的 classifier 請求仍然發出去了。系統靠 `consumeSpeculativeClassifierCheck` 的一次性消費語意和 `promise.catch(() => {})` 的靜默忽略來處理這個浪費，而不是試圖取消網路請求。
 
 ## 拒絕的 Cascading 效應
 

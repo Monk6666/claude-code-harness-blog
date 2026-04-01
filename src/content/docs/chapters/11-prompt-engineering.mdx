@@ -43,7 +43,7 @@ graph TD
     style D fill:#6366f1,color:#fff
 ```
 
-核心實現在 `buildEffectiveSystemPrompt()` 函數中：
+核心實現在 `buildEffectiveSystemPrompt()` 函式中：
 
 ```typescript
 // src/utils/systemPrompt.ts
@@ -120,7 +120,7 @@ export function DANGEROUS_uncachedSystemPromptSection(
 }
 ```
 
-函數命名 `DANGEROUS_uncachedSystemPromptSection` 刻意加上 `DANGEROUS_` 前綴 — 這是一個**工程約束的設計模式**。每次有人想要新增揮發型 section，命名本身就在提醒：「這會破壞快取，你確定需要嗎？」第三個參數 `_reason` 強制開發者記錄理由。
+函式命名 `DANGEROUS_uncachedSystemPromptSection` 刻意加上 `DANGEROUS_` 前綴 — 這是一個**工程約束的設計模式**。每次有人想要新增揮發型 section，命名本身就在提醒：「這會破壞快取，你確定需要嗎？」第三個參數 `_reason` 強制開發者記錄理由。
 
 ### Section 解析流程
 
@@ -238,7 +238,7 @@ return [
 
 ### Cache Scope 分割邏輯
 
-`splitSysPromptPrefix()` 函數負責將系統提示詞切割成帶有不同 `cacheScope` 的區塊：
+`splitSysPromptPrefix()` 函式負責將系統提示詞切割成帶有不同 `cacheScope` 的區塊：
 
 ```typescript
 // src/utils/api.ts — splitSysPromptPrefix() 的三種模式
@@ -356,7 +356,7 @@ Claude Code 的系統提示詞中包含多種**防禦性設計模式**，防止 
 
 ## 11.6 Tool Description 格式化
 
-系統提示詞中的工具描述不是手寫的 — 它們由 `toolToAPISchema()` 函數從工具定義自動生成：
+系統提示詞中的工具描述不是手寫的 — 它們由 `toolToAPISchema()` 函式從工具定義自動生成：
 
 ```typescript
 // src/utils/api.ts
@@ -625,12 +625,12 @@ Claude Code 的系統提示詞設計揭示了一個重要工程原則：**Prompt
 
 - **模組化** — Section 系統讓各部分獨立演化
 - **快取策略** — Boundary 機制將成本降到最低
-- **版本控制** — 函數命名中的 `DANGEROUS_` 前綴是活的文件
+- **版本控制** — 函式命名中的 `DANGEROUS_` 前綴是活的文件
 - **防禦性設計** — 每條規則背後都有真實的失敗案例
 - **多態性** — 同一系統支援多種完全不同的「人格」
 
 理解這些設計模式，不僅有助於理解 Claude Code 的運作原理，更能為你自己的 LLM 應用提供**Prompt 工程架構**的參考。
 
 :::note[承先啟後]
-我們現在理解了 Claude Code 的 prompt 設計哲學：靜態在前、動態在後、快取為王。但 Claude Code 還有很多不在文檔中的功能——隱藏在 feature flags 和環境變數背後。Ch.12 是一次深入探索：那些只有源碼讀者才知道的開關。
+我們現在理解了 Claude Code 的 prompt 設計哲學：靜態在前、動態在後、快取為王。但 Claude Code 還有很多不在文件中的功能——隱藏在 feature flags 和環境變數背後。Ch.12 是一次深入探索：那些只有原始碼讀者才知道的開關。
 :::

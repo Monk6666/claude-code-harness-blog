@@ -330,7 +330,7 @@ if (feature('CONTEXT_COLLAPSE')) {
 
 快取失效是電腦科學中最難的兩件事之一。在 Claude Code 的 context 系統中，**一個看起來無關的操作——設定 system prompt injection——必須同時清除兩個看似獨立的快取。** 理解這個設計，就理解了 Claude Code 為何把 system context 和 user context 視為一個一致性單元。
 
-**問題**：`getSystemContext` 和 `getUserContext` 都是用 `lodash-es/memoize` 快取的函數，在 session 期間各自獨立。但如果只清除其中一個，下次組裝 system prompt 時，stale 的那個快取可能產生不一致的假設——舊的 user context（CLAUDE.md 內容）和新的 system context（含新注入）或反之，形成概念上的不一致。
+**問題**：`getSystemContext` 和 `getUserContext` 都是用 `lodash-es/memoize` 快取的函式，在 session 期間各自獨立。但如果只清除其中一個，下次組裝 system prompt 時，stale 的那個快取可能產生不一致的假設——舊的 user context（CLAUDE.md 內容）和新的 system context（含新注入）或反之，形成概念上的不一致。
 
 **背景**：`setSystemPromptInjection()` 是 ant-only 的 `/inject-prompt` 命令的核心，也是 `BREAK_CACHE_COMMAND` feature 的一部分。它的目的是動態地在 system prompt 中插入 `[CACHE_BREAKER: ...]` 標記，強制伺服器端 cache 失效（用於除錯）。一旦 system prompt 結構改變，整個 prompt prefix 都不同了，user context 的快取（CLAUDE.md 的內容）也必須重新組裝才能確保一致。
 

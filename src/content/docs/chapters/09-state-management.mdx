@@ -6,7 +6,7 @@ sidebar:
 ---
 
 :::note[前置知識橋]
-Ch.07 的 `query()` loop 在每輪都讀寫 `AppState` 物件。本章解釋這個 `AppState` 的設計哲學——為什麼一個簡單的 store 比 Redux 更適合 agent 系統，以及 `ToolUseContext` 如何成為貫穿整個調用棧的上下文載體。
+Ch.07 的 `query()` loop 在每輪都讀寫 `AppState` 物件。本章解釋這個 `AppState` 的設計哲學——為什麼一個簡單的 store 比 Redux 更適合 agent 系統，以及 `ToolUseContext` 如何成為貫穿整個呼叫堆疊的上下文載體。
 :::
 
 ## 為什麼 AI 代理需要狀態管理？
@@ -104,11 +104,11 @@ export function createStore<T>(
 
 Redux 的 API surface 超過 20 個頂層函式與 middleware interface。這個 store 是 3 個。**匹配需求的複雜度，而不是匹配生態系的期望**，是這個設計的核心邏輯。
 
-## ToolUseContext：貫穿調用棧的上下文物件
+## ToolUseContext：貫穿呼叫堆疊的上下文物件
 
 如果每個工具都需要讀寫 `AppState`、檢查中止信號、記錄進度、以及存取工具列表，最直覺的做法是使用全域變數。但全域變數讓工具無法在不同的執行環境下運作——主代理和子代理共用全域狀態，意味著子代理的 `setState` 會影響主代理的 UI；子代理的中止信號無法與主代理分離。
 
-`ToolUseContext` 是解法：把所有執行期依賴打包成一個物件，從調用棧頂端傳到底端，每一層都可以看到完整的上下文，而不需要存取全域狀態。
+`ToolUseContext` 是解法：把所有執行期依賴打包成一個物件，從呼叫堆疊頂端傳到底端，每一層都可以看到完整的上下文，而不需要存取全域狀態。
 
 **完整的傳播路徑：**
 
@@ -173,7 +173,7 @@ async function* runToolUse(
 )
 ```
 
-`ToolUseContext` 是一個依賴注入（DI）的輕量實現——沒有 container、沒有 IoC framework，只是一個型別明確的 record，在整個調用棧中顯式傳遞。子代理在 `createSubagentContext()` 中建立一個派生的 context，其中 `setAppState` 被替換為 no-op，`abortController` 被替換為子代理自己的 controller，`options.tools` 被替換為過濾後的子集。
+`ToolUseContext` 是一個依賴注入（DI）的輕量實現——沒有 container、沒有 IoC framework，只是一個型別明確的 record，在整個呼叫堆疊中顯式傳遞。子代理在 `createSubagentContext()` 中建立一個派生的 context，其中 `setAppState` 被替換為 no-op，`abortController` 被替換為子代理自己的 controller，`options.tools` 被替換為過濾後的子集。
 
 **代價**：`ToolUseContext` 變得越來越肥——目前已有超過 20 個欄位，其中很多是 optional 的。這是依賴注入的常見病症：當依賴越來越多，container 就越來越難以閱讀。
 
