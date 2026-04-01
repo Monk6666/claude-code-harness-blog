@@ -5,6 +5,10 @@ sidebar:
   order: 11
 ---
 
+:::note[前置知識橋]
+Ch.06 介紹了 context window 的有限性和壓縮策略。本章從另一個角度看這個問題：如何設計 system prompt 讓有限的 context budget 發揮最大效果。Context 壓縮是被動防禦；Prompt 設計是主動優化。
+:::
+
 ## 為什麼系統提示詞是工程問題？
 
 在大多數 LLM 應用中，系統提示詞只是一段靜態文字。但在 Claude Code 這樣的自主工程代理中，系統提示詞是一個**動態組裝的多層系統**，它必須：
@@ -453,6 +457,168 @@ return asSystemPrompt([
 ])
 ```
 
+## Cache 的真實成本：一組具體數字
+
+大多數討論 prompt cache 的文章停在「可以省錢」這個結論。讓我們給出一組具體數字，讓「省多少」變得可量化。
+
+### 基準估算
+
+Claude Code 的完整 system prompt 包含七個靜態段落（身份、系統規範、任務準則、行動準則、工具說明、語調風格、輸出效率）加上動態 Section（session guidance、memory、env info、MCP instructions），加上完整的工具定義（數十個工具的 schema）。根據實際測量，這個組合約佔 **50,000 input tokens**。
+
+| 情境 | 計算方式 | 每次呼叫成本 |
+|---|---|---|
+| **無 cache**（每次全量） | 50,000 × $15 / 1,000,000 | **$0.75** |
+| **有 cache，首次寫入** | 50,000 × $15 / 1,000,000 | $0.75（加上快取寫入費） |
+| **有 cache，後續命中** | 50,000 × $1.50 / 1,000,000 | **$0.075** |
+
+快取命中率的價格是完整價格的 **10%**（Anthropic Prompt Cache 定價：讀取 $1.50/MTok vs 完整 $15/MTok，以 claude-sonnet-4-x 計）。
+
+### 一次對話的累積效果
+
+假設一次 Claude Code session 有 10 輪對話（10 次 API 呼叫），靜態前綴在第一輪後全部命中快取：
+
+```
+無 cache：10 輪 × $0.75 = $7.50 / session
+有 cache：$0.75（首輪）+ 9 × $0.075 = $0.75 + $0.675 = $1.425 / session
+節省：$7.50 - $1.425 = $6.075（節省約 81%）
+```
+
+這個數字在多代理場景中效果更顯著：每個子代理透過 `saveCacheSafeParams()` / `getLastCacheSafeParams()` 共享相同前綴，等同於子代理的 system prompt 成本幾乎為零。
+
+### cache_control 的實作
+
+快取是透過 Anthropic API 的 `cache_control` 標記觸發的。Claude Code 在工具列表的最後一個工具定義上加上 `cache_control: { type: 'ephemeral' }`，告知 API：「從請求開頭到這個位置之前的所有內容，請快取起來。」
+
+```typescript
+// src/utils/api.ts — 工具列表末尾加上 cache_control 標記
+const toolSchemas = await Promise.all(
+  tools.map((tool, index) =>
+    toolToAPISchema(tool, {
+      ...options,
+      cacheControl: index === tools.length - 1
+        ? { type: 'ephemeral' }
+        : undefined,
+    })
+  )
+)
+```
+
+**後果（Consequence）：** Cache 讓靜態前綴的成本接近零，但這個設計有一個隱藏的約束：一旦靜態前綴的任何內容改變（哪怕是一個空格），整個快取就失效。這就是為什麼 `DANGEROUS_uncachedSystemPromptSection` 存在——任何可能改變的內容都必須放在動態區域，絕對不能混入靜態前綴。
+
+## LLM 如何知道自己在哪個 Mode？
+
+直覺上，你可能以為 mode 切換是運行時的 if/else：Claude 在回應某個問題時，根據當前狀態決定「現在是 coordinator mode」。這個直覺是錯的。
+
+Mode 在 **session 啟動時**就已決定，透過 `getSystemPrompt()` 選擇完全不同的 section 組合，在第一個字元發送給 LLM 之前就已確定身份。
+
+### 三種 Mode 的 System Prompt 對比
+
+```typescript
+// src/constants/prompts.ts — getSystemPrompt() 的三條路徑
+
+// --- Simple Mode（約 1 行）---
+if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
+  return [
+    `You are Claude Code, Anthropic's official CLI for Claude.\n\nCWD: ${getCwd()}\nDate: ${getSessionStartDate()}`,
+  ]
+  // 結果：~1 行文字，完全沒有工具說明、安全規範、程式碼風格指引
+}
+
+// --- Proactive Mode（自主工作模式，精簡版）---
+if (proactiveModule?.isProactiveActive()) {
+  return [
+    `\nYou are an autonomous agent. Use the available tools to do useful work.`,
+    getSystemRemindersSection(),    // 系統提醒
+    await loadMemoryPrompt(),       // 記憶體
+    envInfo,                        // 環境資訊
+    getLanguageSection(),           // 語言偏好
+    getMcpInstructionsSection(),    // MCP 指令
+    getProactiveSection(),          // Tick 機制、Sleep 管理
+    // 注意：沒有 getSimpleDoingTasksSection()、getActionsSection()（安全準則）
+  ].filter(Boolean)
+}
+
+// --- Standard / Coordinator Mode（完整版）---
+return [
+  getSimpleIntroSection(),         // 身份與角色（含 OutputStyle）
+  getSimpleSystemSection(),        // 系統行為規範
+  getSimpleDoingTasksSection(),    // 任務執行準則
+  getActionsSection(),             // 行動安全準則（可逆性、blast radius）
+  getUsingYourToolsSection(),      // 工具使用指引（數千 token）
+  getSimpleToneAndStyleSection(),  // 語調風格
+  getOutputEfficiencySection(),    // 輸出效率
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY, // 快取邊界標記
+  ...resolvedDynamicSections,     // 動態 Section（memory、env、MCP 等）
+]
+```
+
+### Coordinator Mode 的特殊身份
+
+當 `isCoordinatorMode()` 返回 `true`（透過環境變數 `CLAUDE_CODE_COORDINATOR_MODE=1` 觸發），`buildEffectiveSystemPrompt()` 改為使用 `getCoordinatorSystemPrompt()`：
+
+```typescript
+// src/coordinator/coordinatorMode.ts:getCoordinatorSystemPrompt()
+// 完整替換預設 system prompt，核心身份變為：
+`You are Claude Code, an AI assistant that orchestrates software engineering
+tasks across multiple workers.
+// 包含：Worker 管理指引、任務分解模板、平行化最佳實踐、
+//       AgentTool / SendMessageTool / TaskStopTool 的詳細使用說明
+// 不包含：一般使用者互動指引、程式碼風格規範（coordinator 不直接寫程式碼）`
+```
+
+### Mode 切換的代價
+
+**後果（Consequence）：** 切換 mode 需要重新啟動 session。原因是 mode 決定了 system prompt 的整個結構，而 Anthropic API 的 prompt cache 是基於前綴匹配的——一旦 system prompt 改變，整個快取失效，LLM 的「身份」也從根本上改變。你不能在對話中途從 Standard mode 切換到 Coordinator mode，就像你不能在演講中途換掉講稿的前三頁一樣。
+
+## 為什麼靜態 Prefix 必須在動態 Section 之前？
+
+這個問題的答案觸及 Anthropic Prompt Cache 的核心實作機制，而且反直覺。
+
+### Prefix Match 的物理約束
+
+Anthropic API 的 prompt cache 不是 key-value 儲存（「如果 system prompt 等於 X，就用快取」）。它是**前綴比對**：快取的是從請求開頭到 `cache_control` 標記位置的連續位元組序列。如果這個序列的任何一個位元組改變，快取就完全失效。
+
+這有一個重要的工程後果：**可變內容出現得越早，快取命中率越低。**
+
+```
+反例（100% cache miss rate）：
+[Git 狀態 — 每次不同] → [使用者名稱] → [CLAUDE.md 內容] → [工具定義] → cache_control
+每次呼叫，「Git 狀態」一改變，後面所有內容都不會被快取。
+
+正例（≈100% cache hit rate）：
+[身份] → [行為規範] → [工具定義] → cache_control → [DYNAMIC_BOUNDARY] → [Git 狀態]
+身份和工具定義幾乎不變，cache_control 標記之前的內容幾乎每次都命中。
+```
+
+### SYSTEM_PROMPT_DYNAMIC_BOUNDARY 的精確作用
+
+```typescript
+// src/constants/prompts.ts
+/**
+ * Everything BEFORE this marker in the system prompt array can use scope: 'global'.
+ * Everything AFTER contains user/session-specific content and should not be cached.
+ *
+ * WARNING: Do not remove or reorder this marker without updating cache logic in:
+ * - src/utils/api.ts (splitSysPromptPrefix)
+ * - src/services/api/claude.ts (buildSystemPromptBlocks)
+ */
+export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY =
+  '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
+```
+
+這個常數本身不會出現在 LLM 看到的 system prompt 中（`splitSysPromptPrefix()` 在處理時會跳過它，原始碼注解：`if (prompt === SYSTEM_PROMPT_DYNAMIC_BOUNDARY) continue // Skip boundary`）。它只是一個**分割信號**，告訴快取邏輯：「從這裡開始，用不同的快取策略處理。」
+
+### 靜態 vs 動態的分類原則
+
+| 類別 | 快取策略 | 範例 |
+|---|---|---|
+| **靜態（全域快取）** | `cacheScope: 'global'`，跨組織共享 | 身份定義、行為規範、安全準則、工具定義 |
+| **動態（不快取）** | 不標記 `cache_control` | Git 狀態、CLAUDE.md 內容、MCP 伺服器列表、當前日期 |
+
+`mcp_instructions` section 使用 `DANGEROUS_uncachedSystemPromptSection`，因為 MCP 伺服器可能在 session 中途連接或斷開。如果這個 section 被放在邊界之前，每次 MCP 狀態改變都會讓「全域快取」的靜態部分失效——對所有使用者。
+
+**後果（Consequence）：** 「靜態前綴必須在動態 Section 之前」不是一條偏好，而是一條工程約束。原始碼的 `WARNING` 注解和 `DANGEROUS_` 前綴都在強調：這個順序是快取系統正確運作的基礎，打破它的代價是顯著的 API 成本增加。
+
 ## 小結
 
 Claude Code 的系統提示詞設計揭示了一個重要工程原則：**Prompt 不是文案，而是軟體**。它需要：
@@ -464,3 +630,7 @@ Claude Code 的系統提示詞設計揭示了一個重要工程原則：**Prompt
 - **多態性** — 同一系統支援多種完全不同的「人格」
 
 理解這些設計模式，不僅有助於理解 Claude Code 的運作原理，更能為你自己的 LLM 應用提供**Prompt 工程架構**的參考。
+
+:::note[承先啟後]
+我們現在理解了 Claude Code 的 prompt 設計哲學：靜態在前、動態在後、快取為王。但 Claude Code 還有很多不在文檔中的功能——隱藏在 feature flags 和環境變數背後。Ch.12 是一次深入探索：那些只有源碼讀者才知道的開關。
+:::
